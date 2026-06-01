@@ -1,9 +1,9 @@
-import copy, heapq, tkinter as tk
+import copy, heapq, math, tkinter as tk
 from tkinter import ttk, messagebox
 import threading, time, random
 
 # ══════════════════════════════════════════════════════
-#  THUẬT TOÁN  –  Greedy & A*
+#  THUẬT TOÁN  –  Greedy, A*, IDA*
 # ══════════════════════════════════════════════════════
 
 def state_to_tuple(s): return tuple(tuple(r) for r in s)
@@ -94,6 +94,70 @@ def astar_search(start, goal, hfn, cb):
                     {'state': ns, 'parent': cur, 'action': a, 'h': h, 'g': g2, 'f': f2}))
     cb('fail', {'exp': exp})
 
+def idastar_search(start, goal, hfn, cb):
+    """IDA* – Iterative Deepening A*.
+    Dùng DFS đệ qui với giới hạn f(n). Mỗi vòng lặp nới giới hạn
+    lên f nhỏ nhất bị cắt ở vòng trước.
+    """
+    h0    = hfn(start, goal)
+    root  = {'state': start, 'parent': None, 'action': None,
+             'h': h0, 'g': 0, 'f': h0}
+    limit = h0
+    exp   = [0]           # dùng list để có thể sửa trong closure
+
+    def dfs(node, path_set):
+        """Trả về: ('found', path) | ('cutoff', min_exceeded_f) | ('fail', inf)"""
+        if not cb('alive', {}):
+            return ('stop', None)
+
+        f = node['f']
+        if f > limit:
+            return ('cutoff', f)
+
+        exp[0] += 1
+        cb('explore', {'node': node, 'exp': exp[0], 'frn': 0, 'limit': limit})
+        time.sleep(0.05)
+
+        if node['state'] == goal:
+            return ('found', trace_path(node))
+
+        min_f = math.inf
+        for a in get_actions(node['state']):
+            ns  = do_move(node['state'], a)
+            nt  = state_to_tuple(ns)
+            if nt in path_set:
+                continue
+            g2  = node['g'] + 1
+            h2  = hfn(ns, goal)
+            child = {'state': ns, 'parent': node, 'action': a,
+                     'h': h2, 'g': g2, 'f': g2 + h2}
+            path_set.add(nt)
+            res, val = dfs(child, path_set)
+            path_set.discard(nt)
+
+            if res == 'found':  return ('found', val)
+            if res == 'stop':   return ('stop', None)
+            if res == 'cutoff' and val < min_f:
+                min_f = val
+
+        return ('cutoff', min_f) if min_f < math.inf else ('fail', math.inf)
+
+    nonlocal_limit = [h0]   # wrapper so outer loop can mutate
+
+    while True:
+        limit = nonlocal_limit[0]
+        path_set = {state_to_tuple(start)}
+        res, val = dfs(root, path_set)
+
+        if res == 'found':
+            cb('done', {'path': val, 'exp': exp[0], 'frn': 0}); return
+        if res == 'stop':
+            return
+        if res == 'fail' or val == math.inf:
+            cb('fail', {'exp': exp[0]}); return
+        # nới limit
+        nonlocal_limit[0] = val
+
 # ══════════════════════════════════════════════════════
 #  MÀU SẮC  –  Vivid Neon-Dark
 # ══════════════════════════════════════════════════════
@@ -155,10 +219,12 @@ BTN_APPLY = '#003A7A'
 #  CONFIG
 # ══════════════════════════════════════════════════════
 ALGOS = {
-    'Greedy — Misplaced Tiles':    ('greedy', 'misplaced'),
-    'Greedy — Manhattan Distance': ('greedy', 'manhattan'),
-    'A* — Misplaced Tiles':        ('astar',  'misplaced'),
-    'A* — Manhattan Distance':     ('astar',  'manhattan'),
+    'Greedy — Misplaced Tiles':    ('greedy',  'misplaced'),
+    'Greedy — Manhattan Distance': ('greedy',  'manhattan'),
+    'A* — Misplaced Tiles':        ('astar',   'misplaced'),
+    'A* — Manhattan Distance':     ('astar',   'manhattan'),
+    'IDA* — Misplaced Tiles':      ('idastar', 'misplaced'),
+    'IDA* — Manhattan Distance':   ('idastar', 'manhattan'),
 }
 
 DEFAULT_START = [[2, 1, 4], [7, 0, 6], [5, 3, 8]]
@@ -194,6 +260,7 @@ class App(tk.Tk):
         self.F_STAT = ('Segoe UI', 10, 'bold')
 
         self._build()
+        self._update_info_labels()   # init description labels on startup
 
     # ──────────────────────────────────────────
     #  BUILD UI
@@ -245,6 +312,8 @@ class App(tk.Tk):
                           state='readonly', font=self.F_BODY, width=26)
         cb.pack(side=tk.LEFT, pady=10)
         cb.bind('<<ComboboxSelected>>', lambda e: self._on_algo_change())
+        # wider for IDA* labels
+        cb.config(width=28)
 
         self._vsep(hdr)
 
@@ -317,7 +386,6 @@ class App(tk.Tk):
         bf = tk.Frame(inner, bg=BLU_BG)
         bf.grid(row=2, column=0, columnspan=2, pady=(6, 0), sticky='w', padx=6)
         self._btn(bf, 'Ngau Nhien', BTN_RAND, self._randomize).pack(side=tk.LEFT, padx=2)
-        self._btn(bf, 'Ap Dung',    BTN_APPLY, self._apply_start).pack(side=tk.LEFT, padx=2)
 
     # ── GREEN SECTION (Bảng hiện tại + Đường đi) ─
     def _build_green(self, parent):
@@ -387,19 +455,22 @@ class App(tk.Tk):
                  font=self.F_HDR).pack(anchor='w')
 
         self._cv = {}
+        self._desc_lbl = {}   # holds the description Label refs for dynamic update
         info_rows = [
-            ('h(n)', 'Heuristic (ô sai / Manhattan)', CLR_H),
-            ('g(n)', 'Chi phí thực tế (A*)',           CLR_G),
-            ('f(n)', 'f = g + h  (A*)',                CLR_F),
-            ('algo', 'Thuật toán',                     CLR_ALGO),
+            ('h(n)',   '',   CLR_H),
+            ('g(n)',   '',   CLR_G),
+            ('f(n)',   '',   CLR_F),
+            ('limit',  'Nguong f hien tai (IDA*)', CLR_WARN),
+            ('algo',   'Thuat toan',               CLR_ALGO),
         ]
         for key, desc, clr in info_rows:
             rf = tk.Frame(inner, bg=RED_BG)
             rf.pack(fill=tk.X, pady=2)
             tk.Label(rf, text=f'{key}:', bg=RED_BG, fg=TXT_M,
                      font=self.F_STAT, width=6, anchor='w').pack(side=tk.LEFT)
-            tk.Label(rf, text=desc, bg=RED_BG, fg=TXT_D,
-                     font=self.F_STAT).pack(side=tk.LEFT)
+            dl = tk.Label(rf, text=desc, bg=RED_BG, fg=TXT_D, font=self.F_STAT)
+            dl.pack(side=tk.LEFT)
+            self._desc_lbl[key] = dl
             v = tk.Label(rf, text='—', bg=RED_BG, fg=clr, font=self.F_BDGE)
             v.pack(side=tk.RIGHT)
             self._cv[key] = v
@@ -511,19 +582,26 @@ class App(tk.Tk):
                 bg  = GRN_EM if em else (GRN_ACT if act else GRN_TILE)
                 self._ct[i][j].config(text=str(v) if not em else '', bg=bg, fg=GRN_TXT)
 
-    def _update_costs(self, node):
+    def _update_costs(self, node, limit=None):
         algo_type = ALGOS[self._algo_var.get()][0]
-        is_astar  = (algo_type == 'astar')
+        is_astar   = (algo_type == 'astar')
+        is_idastar = (algo_type == 'idastar')
+        show_g = is_astar or is_idastar
         if node is None:
             self._cv['h(n)'].config(text='—')
-            self._cv['g(n)'].config(text='—' if is_astar else 'N/A')
-            self._cv['f(n)'].config(text='—' if is_astar else 'N/A')
-            self._cv['algo'].config(text='A*' if is_astar else 'Greedy')
+            self._cv['g(n)'].config(text='—' if show_g else 'N/A')
+            self._cv['f(n)'].config(text='—' if show_g else 'N/A')
+            self._cv['limit'].config(text='—' if is_idastar else 'N/A')
+            self._cv['algo'].config(text=
+                'IDA*' if is_idastar else ('A*' if is_astar else 'Greedy'))
         else:
             self._cv['h(n)'].config(text=str(node.get('h', '—')))
-            self._cv['g(n)'].config(text=str(node.get('g', '—')) if is_astar else 'N/A')
-            self._cv['f(n)'].config(text=str(node.get('f', '—')) if is_astar else 'N/A')
-            self._cv['algo'].config(text='A*' if is_astar else 'Greedy')
+            self._cv['g(n)'].config(text=str(node.get('g', '—')) if show_g else 'N/A')
+            self._cv['f(n)'].config(text=str(node.get('f', '—')) if show_g else 'N/A')
+            self._cv['limit'].config(text=str(limit) if is_idastar and limit is not None else
+                                     ('—' if is_idastar else 'N/A'))
+            self._cv['algo'].config(text=
+                'IDA*' if is_idastar else ('A*' if is_astar else 'Greedy'))
 
     def _update_stats(self, exp, frn, stp='—'):
         self._lbl_exp.config(text=str(exp))
@@ -568,6 +646,31 @@ class App(tk.Tk):
     # ──────────────────────────────────────────
     def _on_algo_change(self):
         self._update_costs(None)
+        self._update_info_labels()
+
+    def _update_info_labels(self):
+        """Cập nhật phần mô tả của từng dòng trong panel đỏ theo thuật toán đang chọn."""
+        key = self._algo_var.get()
+        algo_type, heur_type = ALGOS[key]
+
+        # h(n) description
+        h_desc = 'Manhattan Distance' if heur_type == 'manhattan' else 'Misplaced Tiles'
+
+        # g(n) description
+        if algo_type == 'greedy':
+            g_desc = 'Khong dung (Greedy)'
+        else:
+            g_desc = 'So buoc di thuc te (step count)'
+
+        # f(n) description
+        if algo_type == 'greedy':
+            f_desc = 'Khong dung (Greedy)'
+        else:
+            f_desc = 'f = g(n) + h(n)'
+
+        self._desc_lbl['h(n)'].config(text=h_desc)
+        self._desc_lbl['g(n)'].config(text=g_desc)
+        self._desc_lbl['f(n)'].config(text=f_desc)
 
     def _randomize(self):
         nums = list(range(9)); random.shuffle(nums)
@@ -576,7 +679,8 @@ class App(tk.Tk):
         self._refresh_start_entries()
         self._update_cur_board(self._cur)
 
-    def _apply_start(self):
+    def _parse_start_entries(self):
+        """Reads the 3x3 entry grid, validates, returns list-of-lists or None on error."""
         s, used = [], set()
         for i in range(3):
             row = []
@@ -585,17 +689,22 @@ class App(tk.Tk):
                 if raw == '': val = 0
                 elif raw.isdigit(): val = int(raw)
                 else:
-                    messagebox.showerror('Lỗi', f'Giá trị "{raw}" không hợp lệ!'); return
+                    messagebox.showerror('Loi', f'Gia tri "{raw}" khong hop le!'); return None
                 if val > 8:
-                    messagebox.showerror('Lỗi', f'Số {val} > 8!'); return
+                    messagebox.showerror('Loi', f'So {val} > 8!'); return None
                 if val in used:
-                    messagebox.showerror('Lỗi', f'Số {val} bị trùng!'); return
+                    messagebox.showerror('Loi', f'So {val} bi trung!'); return None
                 used.add(val); row.append(val)
             s.append(row)
         if used != set(range(9)):
-            messagebox.showerror('Lỗi', 'Cần đủ các số 0–8!'); return
-        self._start = s
-        self._cur   = copy.deepcopy(s)
+            messagebox.showerror('Loi', 'Can du cac so 0-8!'); return None
+        return s
+
+    def _apply_start(self):
+        parsed = self._parse_start_entries()
+        if parsed is None: return
+        self._start = parsed
+        self._cur   = copy.deepcopy(parsed)
         self._update_cur_board(self._cur)
         self._status_lbl.config(text='Da cap nhat trang thai dau', fg=BLU_BDR)
 
@@ -619,10 +728,17 @@ class App(tk.Tk):
     # ──────────────────────────────────────────
     def _solve(self):
         if self._running: return
+        # Auto-read start state from entry grid
+        parsed = self._parse_start_entries()
+        if parsed is None: return
+        self._start = parsed
+        self._cur   = copy.deepcopy(parsed)
+        self._update_cur_board(self._cur)
+
         if not is_solvable(self._start, self._goal):
-            messagebox.showwarning('Không giải được',
-                                   'Trạng thái này không thể giải!\n'
-                                   'Hãy thử lại hoặc bấm Ngẫu Nhiên.')
+            messagebox.showwarning('Khong giai duoc',
+                                   'Trang thai nay khong the giai!\n'
+                                   'Hay thu lai hoac bam Ngau Nhien.')
             return
         self._running = True
         self._log_clear()
@@ -634,7 +750,9 @@ class App(tk.Tk):
         key = self._algo_var.get()
         algo_type, heur_type = ALGOS[key]
         hfn = h_manhattan if heur_type == 'manhattan' else h_misplaced
-        fn  = astar_search if algo_type == 'astar' else greedy_search
+        if algo_type == 'astar':   fn = astar_search
+        elif algo_type == 'idastar': fn = idastar_search
+        else:                      fn = greedy_search
 
         self._log_write(f'[BẮT ĐẦU]  {key}', 'info')
         start = copy.deepcopy(self._start)
@@ -648,10 +766,12 @@ class App(tk.Tk):
         if event == 'alive':
             return self._running
         if event == 'explore':
-            node = data['node']
-            exp  = data['exp']
-            frn  = data['frn']
-            self.after(0, lambda n=node, e=exp, f=frn: self._on_explore(n, e, f))
+            node  = data['node']
+            exp   = data['exp']
+            frn   = data['frn']
+            lim   = data.get('limit')       # only IDA* sends this
+            self.after(0, lambda n=node, e=exp, f=frn, l=lim:
+                       self._on_explore(n, e, f, l))
             time.sleep(0.05)
         elif event == 'done':
             path, exp, frn = data['path'], data['exp'], data['frn']
@@ -660,16 +780,18 @@ class App(tk.Tk):
             exp = data['exp']
             self.after(0, lambda e=exp: self._on_fail(e))
 
-    def _on_explore(self, node, exp, frn):
+    def _on_explore(self, node, exp, frn, limit=None):
         st = node['state']
         self._update_cur_board(st)
         self._update_stats(exp, frn)
-        self._update_costs(node)
+        self._update_costs(node, limit)
         algo_type = ALGOS[self._algo_var.get()][0]
         row = [v for r in st for v in r]
         msg = f'[#{exp:>4}] {row}   h={node["h"]}'
-        if algo_type == 'astar':
+        if algo_type in ('astar', 'idastar'):
             msg += f'  g={node["g"]}  f={node["f"]}'
+        if algo_type == 'idastar' and limit is not None:
+            msg += f'  lim={limit}'
         self._log_write(msg, 'explore')
 
     def _on_done(self, path, exp, frn):
