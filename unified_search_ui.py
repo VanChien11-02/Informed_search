@@ -6,6 +6,12 @@ import threading, time, random
 #  SHARED UTILITIES
 # ═══════════════════════════════════════════════════════════
 
+def random_start_state():
+    nums  = list(range(9))
+    random.shuffle(nums)
+    start= [nums[0:3], nums[3:6], nums[6:9]]
+    return start
+
 def state_to_tuple(s): return tuple(tuple(r) for r in s)
 
 def get_blank(s):
@@ -54,6 +60,15 @@ def trace_path_dict(node):
 def trace_path_obj(node):
     path, n = [], node
     while n is not None:
+        path.append({'state': n.state, 'action': n.action})
+        n = n.parent
+    path.reverse()
+    return path
+
+def trace_path_obj0(node):
+    """Trace path for nodes where parent sentinel is 0 (not None)."""
+    path, n = [], node
+    while n != 0 and n is not None:
         path.append({'state': n.state, 'action': n.action})
         n = n.parent
     path.reverse()
@@ -148,11 +163,11 @@ def idastar_search(start, goal, hfn, cb):
         cur_limit[0] = val
 
 # ═══════════════════════════════════════════════════════════
-#  LOCAL SEARCH — Simple Hill Climbing
-#  (logic port tu simple_hill_climbing.py: Problem, Node, for...else)
+#  LOCAL SEARCH — Shared Node class (supports both heuristics)
 # ═══════════════════════════════════════════════════════════
 
-class SHCProblem:
+class LSProblem:
+    """Shared problem class cho tat ca Local Search algorithms."""
     def __init__(self, initial, goal):
         self.state = initial
         self.goal  = goal
@@ -160,13 +175,14 @@ class SHCProblem:
     def goal_test(self, state): return state == self.goal
 
     @staticmethod
-    def get_blank(state):
+    def getLocationNull(state):
         for i in range(3):
             for j in range(3):
                 if state[i][j] == 0: return i, j
+        return None
 
-    def actions(self, state):
-        x, y = self.get_blank(state)
+    def Actions(self, state):
+        x, y = self.getLocationNull(state)
         lst = []
         if x < 2: lst.append('D')
         if x > 0: lst.append('U')
@@ -175,8 +191,9 @@ class SHCProblem:
         return lst
 
 
-class SHCNode:
-    def __init__(self, state, goal, hfn, parent=None, action=None, step=0):
+class LSNode:
+    """Node for Local Search with pluggable heuristic."""
+    def __init__(self, state, goal, hfn, parent=0, action="", step=0):
         self.state  = state
         self.parent = parent
         self.action = action
@@ -188,56 +205,284 @@ class SHCNode:
     def __lt__(self, other): return self.h_cost < other.h_cost
 
 
-def _shc_child(problem, node, action):
-    x, y = problem.get_blank(node.state)
+def _ls_child(problem, node, action):
+    x, y = problem.getLocationNull(node.state)
     if   action == 'U': nx, ny = x-1, y
     elif action == 'D': nx, ny = x+1, y
     elif action == 'L': nx, ny = x,   y-1
     else:               nx, ny = x,   y+1
     cs = copy.deepcopy(node.state)
     cs[x][y], cs[nx][ny] = cs[nx][ny], cs[x][y]
-    return SHCNode(cs, node._goal, node._hfn, parent=node, action=action, step=node.step+1)
+    return LSNode(cs, node._goal, node._hfn, parent=node, action=action, step=node.step+1)
+
+
+# ─── Simple Hill Climbing ─────────────────────────────────
+
+# SHC classes kept as aliases for backward compat
+SHCProblem = LSProblem
+
+class SHCNode(LSNode):
+    pass
+
+def _shc_child(problem, node, action):
+    return _ls_child(problem, node, action)
 
 
 def simple_hc_search(start, goal, hfn, cb):
     """
-    Logic goc tu Simple_hill_climbing() trong simple_hill_climbing.py:
-        for action in problem.Actions(current.state):
+    Logic goc tu Simple_hill_climbing():
+        for action in Actions(current):
             child = node_child(action)
-            if child.h_cost < current.h_cost:
-                current = child; break
-        else:
-            break  # dung: cuc tieu cuc bo hoac goal
+            if child.h <= current.h: current = child; break
+        else: dung
     """
-    problem = SHCProblem(start, goal)
-    current = SHCNode(copy.deepcopy(start), goal, hfn)
+    problem = LSProblem(start, goal)
+    current = LSNode(copy.deepcopy(start), goal, hfn)
 
-    init_hs = [_shc_child(problem, current, a).h_cost
-               for a in problem.actions(current.state)]
+    init_hs = [_ls_child(problem, current, a).h_cost
+               for a in problem.Actions(current.state)]
     cb('shc_step', {'node': current, 'steps': 0, 'neighbors_h': init_hs})
     time.sleep(0.5)
 
     while True:
         if not cb('alive', {}): return
-        moved    = False
-        nbr_hs   = []
-        for action in problem.actions(current.state):
-            child = _shc_child(problem, current, action)
+        moved  = False
+        nbr_hs = []
+        for action in problem.Actions(current.state):
+            child = _ls_child(problem, current, action)
             nbr_hs.append(child.h_cost)
-            if child.h_cost < current.h_cost:
+            if child.h_cost <= current.h_cost:
                 current = child
                 moved   = True
                 cb('shc_step', {'node': current, 'steps': current.step, 'neighbors_h': nbr_hs})
                 time.sleep(0.5)
                 break
         if not moved:
-            path = trace_path_obj(current)
+            path = trace_path_obj0(current)
             if problem.goal_test(current.state):
                 cb('done', {'path': path, 'steps': current.step})
             else:
                 cb('shc_stuck', {'path': path, 'node': current,
                                  'steps': current.step, 'neighbors_h': nbr_hs})
             return
+
+
+# ─── Steepest Ascent Hill Climbing ───────────────────────
+# Logic port tu Steepest_ascent_hill_climbing.py:
+#   chon neighbor tot nhat (h nho nhat) trong tat ca neighbors
+
+def steepest_ascent_hc_search(start, goal, hfn, cb):
+    """
+    Steepest Ascent HC: xet TAT CA neighbors, chon neighbor
+    co h nho nhat. Dung khi khong co neighbor nao tot hon.
+    """
+    problem = LSProblem(start, goal)
+    current = LSNode(copy.deepcopy(start), goal, hfn)
+
+    nbr_hs_init = [_ls_child(problem, current, a).h_cost
+                   for a in problem.Actions(current.state)]
+    cb('loc_step', {'node': current, 'steps': 0, 'neighbors_h': nbr_hs_init,
+                    'algo': 'Steepest HC'})
+    time.sleep(0.5)
+
+    while True:
+        if not cb('alive', {}): return
+        better_neighbors = []
+        nbr_hs = []
+        for action in problem.Actions(current.state):
+            neighbor = _ls_child(problem, current, action)
+            nbr_hs.append(neighbor.h_cost)
+            if neighbor.h_cost <= current.h_cost:
+                heapq.heappush(better_neighbors, (neighbor.h_cost, neighbor))
+
+        if len(better_neighbors) == 0:
+            path = trace_path_obj0(current)
+            if problem.goal_test(current.state):
+                cb('done', {'path': path, 'steps': current.step})
+            else:
+                cb('shc_stuck', {'path': path, 'node': current,
+                                 'steps': current.step, 'neighbors_h': nbr_hs})
+            return
+        else:
+            _, best_neighbor = heapq.heappop(better_neighbors)
+            current = best_neighbor
+            nbr_hs_cur = [_ls_child(problem, current, a).h_cost
+                          for a in problem.Actions(current.state)]
+            cb('loc_step', {'node': current, 'steps': current.step,
+                            'neighbors_h': nbr_hs_cur, 'algo': 'Steepest HC'})
+            time.sleep(0.5)
+
+
+# ─── Stochastic Hill Climbing ────────────────────────────
+# Logic port tu Stochastic_hill_climbing.py:
+#   random.choice trong so cac neighbor tot hon
+
+def stochastic_hc_search(start, goal, hfn, cb):
+    """
+    Stochastic HC: chon NGAU NHIEN mot neighbor co h <= h hien tai.
+    """
+    problem = LSProblem(start, goal)
+    current = LSNode(copy.deepcopy(start), goal, hfn)
+
+    nbr_hs_init = [_ls_child(problem, current, a).h_cost
+                   for a in problem.Actions(current.state)]
+    cb('loc_step', {'node': current, 'steps': 0, 'neighbors_h': nbr_hs_init,
+                    'algo': 'Stochastic HC'})
+    time.sleep(0.5)
+
+    while True:
+        if not cb('alive', {}): return
+        better_neighbors = []
+        nbr_hs = []
+        for action in problem.Actions(current.state):
+            neighbor = _ls_child(problem, current, action)
+            nbr_hs.append(neighbor.h_cost)
+            if neighbor.h_cost <= current.h_cost:
+                better_neighbors.append(neighbor)
+
+        if len(better_neighbors) == 0:
+            path = trace_path_obj0(current)
+            if problem.goal_test(current.state):
+                cb('done', {'path': path, 'steps': current.step})
+            else:
+                cb('shc_stuck', {'path': path, 'node': current,
+                                 'steps': current.step, 'neighbors_h': nbr_hs})
+            return
+
+        next_state = random.choice(better_neighbors)
+        current = next_state
+        nbr_hs_cur = [_ls_child(problem, current, a).h_cost
+                      for a in problem.Actions(current.state)]
+        cb('loc_step', {'node': current, 'steps': current.step,
+                        'neighbors_h': nbr_hs_cur, 'algo': 'Stochastic HC'})
+        time.sleep(0.5)
+
+
+# ─── Random Restart Hill Climbing ────────────────────────
+# Logic port tu Random_restart_hill_climbing.py:
+#   thu nhieu lan tu cac trang thai ngau nhien khac nhau
+
+def random_restart_hc_search(start, goal, hfn, cb):
+    """
+    Random Restart HC: neu bi ket thi khoi dong lai
+    tu mot trang thai ngau nhien khac (toi da max_restart lan).
+    """
+    MAX_RESTART = 10
+    problem = LSProblem(start, goal)
+
+    for restart_idx in range(MAX_RESTART):
+        if restart_idx == 0:
+            init_state = copy.deepcopy(start)
+        else:
+            # Khoi dong lai tu trang thai ngau nhien hop le
+            nums = list(range(9))
+            while True:
+                random.shuffle(nums)
+                ns = [nums[:3], nums[3:6], nums[6:]]
+                if is_solvable(ns, goal):
+                    init_state = ns
+                    break
+
+        current = LSNode(copy.deepcopy(init_state), goal, hfn)
+        choice_visited = set()
+        choice_visited.add(state_to_tuple(current.state))
+
+        cb('rrhc_restart', {'node': current, 'restart': restart_idx,
+                            'steps': current.step})
+        time.sleep(0.3)
+
+        while True:
+            if not cb('alive', {}): return
+            if problem.goal_test(current.state):
+                path = trace_path_obj0(current)
+                cb('done', {'path': path, 'steps': current.step,
+                            'restarts': restart_idx})
+                return
+
+            better_neighbors = []
+            nbr_hs = []
+            for action in problem.Actions(current.state):
+                neighbor = _ls_child(problem, current, action)
+                nt = state_to_tuple(neighbor.state)
+                nbr_hs.append(neighbor.h_cost)
+                if neighbor.h_cost <= current.h_cost and nt not in choice_visited:
+                    better_neighbors.append(neighbor)
+
+            if len(better_neighbors) == 0:
+                # Ket cuc bo, restart
+                cb('rrhc_local_stuck', {'node': current, 'restart': restart_idx,
+                                        'steps': current.step, 'neighbors_h': nbr_hs})
+                time.sleep(0.3)
+                break
+
+            next_state = random.choice(better_neighbors)
+            choice_visited.add(state_to_tuple(next_state.state))
+            current = next_state
+            nbr_hs_cur = [_ls_child(problem, current, a).h_cost
+                          for a in problem.Actions(current.state)]
+            cb('loc_step', {'node': current, 'steps': current.step,
+                            'neighbors_h': nbr_hs_cur, 'algo': 'Random Restart HC'})
+            time.sleep(0.4)
+
+    # Het luot restart — that bai
+    cb('rrhc_fail', {'restarts': MAX_RESTART})
+
+
+# ─── Local Beam Search ───────────────────────────────────
+# Logic port tu local_beam_search.py:
+#   giu k trang thai tot nhat qua moi vong lap
+
+def local_beam_search_fn(start, goal, hfn, cb, k=3):
+    """
+    Local Beam Search: giu k trang thai tot nhat moi vong.
+    k lay tu BEAM_K_VAR neu co, mac dinh k=3.
+    """
+    problem = LSProblem(start, goal)
+    start_node = LSNode(copy.deepcopy(start), goal, hfn)
+    current_set = [start_node]
+    max_iterations = 1000
+
+    cb('beam_init', {'nodes': current_set, 'k': k, 'iteration': 0})
+    time.sleep(0.3)
+
+    for iteration in range(max_iterations):
+        if not cb('alive', {}): return
+
+        neighbor_states = set()
+        neighbor_pqueue = []
+
+        for node in current_set:
+            for action in problem.Actions(node.state):
+                neighbor = _ls_child(problem, node, action)
+                nt = state_to_tuple(neighbor.state)
+                if nt not in neighbor_states:
+                    neighbor_states.add(nt)
+                    if problem.goal_test(neighbor.state):
+                        path = trace_path_obj0(neighbor)
+                        cb('done', {'path': path, 'steps': neighbor.step,
+                                    'iterations': iteration + 1})
+                        return
+                    heapq.heappush(neighbor_pqueue, (neighbor.h_cost, neighbor))
+
+        if len(neighbor_pqueue) == 0:
+            cb('beam_fail', {'iteration': iteration})
+            return
+
+        # Chon k trang thai tot nhat
+        new_set = []
+        while len(new_set) < k and len(neighbor_pqueue) > 0:
+            _, node = heapq.heappop(neighbor_pqueue)
+            new_set.append(node)
+
+        current_set = new_set
+        h_vals = [n.h_cost for n in current_set]
+
+        cb('beam_step', {'nodes': current_set, 'k': k,
+                         'iteration': iteration + 1, 'h_vals': h_vals})
+        time.sleep(0.4)
+
+    cb('beam_fail', {'iteration': max_iterations})
+
 
 # ═══════════════════════════════════════════════════════════
 #  COLORS — Unified Professional Light Theme
@@ -275,7 +520,7 @@ CLR_STEPS = '#7B1FA2';  CLR_H_CUR = '#C62828';  CLR_H_NBR = '#E65100'
 CLR_OK    = '#2E7D32';  CLR_FAIL  = '#C62828';  CLR_WARN  = '#E65100'
 CLR_EXP   = '#00897B';  CLR_FRN   = '#F57F17'
 
-BTN_SOLVE = '#1565C0';  BTN_RAND  = '#6A1B9A';  BTN_RESET = '#B71C1C'
+BTN_SOLVE = '#1565C0';  BTN_RESET = '#B71C1C'
 
 # ═══════════════════════════════════════════════════════════
 #  CONFIG
@@ -285,38 +530,88 @@ HEURISTICS = {
     'Manhattan Distance': h_manhattan,
 }
 
+# CB2 — Thuat toan (khong chua heuristic nua)
 SEARCH_TYPES = {
     'Informed Search': [
-        'Greedy — Misplaced Tiles',
-        'Greedy — Manhattan Distance',
-        'A* — Misplaced Tiles',
-        'A* — Manhattan Distance',
-        'IDA* — Misplaced Tiles',
-        'IDA* — Manhattan Distance',
+        'Greedy',
+        'A*',
+        'IDA*',
     ],
     'Local Search': [
-        'Simple HC — Misplaced Tiles',
-        'Simple HC — Manhattan Distance',
+        'Simple HC',
+        'Steepest Ascent HC',
+        'Stochastic HC',
+        'Random Restart HC',
+        'Local Beam Search',
     ],
 }
 
-# Map algo name -> (fn_key, heur_key)
-ALGO_MAP = {
-    'Greedy — Misplaced Tiles':       ('greedy',   'misplaced'),
-    'Greedy — Manhattan Distance':    ('greedy',   'manhattan'),
-    'A* — Misplaced Tiles':           ('astar',    'misplaced'),
-    'A* — Manhattan Distance':        ('astar',    'manhattan'),
-    'IDA* — Misplaced Tiles':         ('idastar',  'misplaced'),
-    'IDA* — Manhattan Distance':      ('idastar',  'manhattan'),
-    'Simple HC — Misplaced Tiles':    ('simplehc', 'misplaced'),
-    'Simple HC — Manhattan Distance': ('simplehc', 'manhattan'),
+# Map algo name -> fn_key  (heuristic duoc doc tu CB3 rieng)
+ALGO_FN_KEY = {
+    'Greedy':             'greedy',
+    'A*':                 'astar',
+    'IDA*':               'idastar',
+    'Simple HC':          'simplehc',
+    'Steepest Ascent HC': 'steepesthc',
+    'Stochastic HC':      'stochastichc',
+    'Random Restart HC':  'rrhc',
+    'Local Beam Search':  'beamsearch',
 }
 
 ALGO_FN = {
-    'greedy':   greedy_search,
-    'astar':    astar_search,
-    'idastar':  idastar_search,
-    'simplehc': simple_hc_search,
+    'greedy':       greedy_search,
+    'astar':        astar_search,
+    'idastar':      idastar_search,
+    'simplehc':     simple_hc_search,
+    'steepesthc':   steepest_ascent_hc_search,
+    'stochastichc': stochastic_hc_search,
+    'rrhc':         random_restart_hc_search,
+    'beamsearch':   local_beam_search_fn,
+}
+
+# Pseudocode cho tung thuat toan local search
+ALGO_PSEUDOCODE = {
+    'simplehc': (
+        "Simple Hill Climbing:\n"
+        "  for action in Actions(current):\n"
+        "      child = node_child(action)\n"
+        "      if child.h <= current.h:\n"
+        "          current = child; break\n"
+        "  else: dung (cuc tieu cuc bo / goal)"
+    ),
+    'steepesthc': (
+        "Steepest Ascent HC:\n"
+        "  for action in Actions(current):\n"
+        "      neighbor = node_child(action)\n"
+        "      if neighbor.h <= current.h:\n"
+        "          push(better_neighbors, neighbor)\n"
+        "  if better_neighbors empty: dung\n"
+        "  else: current = best(better_neighbors)"
+    ),
+    'stochastichc': (
+        "Stochastic HC:\n"
+        "  for action in Actions(current):\n"
+        "      if neighbor.h <= current.h:\n"
+        "          better.append(neighbor)\n"
+        "  if better empty: dung\n"
+        "  current = random.choice(better)"
+    ),
+    'rrhc': (
+        "Random Restart HC:\n"
+        "  for restart in range(MAX_RESTART=10):\n"
+        "      current = random_start()\n"
+        "      run SimpleHC(current)\n"
+        "      if goal found: return\n"
+        "  return FAIL"
+    ),
+    'beamsearch': (
+        "Local Beam Search (k beams):\n"
+        "  current_set = [start] (k states)\n"
+        "  loop:\n"
+        "      all_nbrs = expand all states in set\n"
+        "      if goal in all_nbrs: return\n"
+        "      current_set = best k of all_nbrs"
+    ),
 }
 
 DEFAULT_START = [[2, 1, 4], [7, 0, 6], [5, 3, 8]]
@@ -448,11 +743,13 @@ class LocalPanel(tk.Frame):
 
         self._cv = {}
         rows = [
-            ('Heuristic',      '',                        '#1565C0'),
-            ('h(n) hien tai',  'gia tri h hien tai',      CLR_H_CUR),
-            ('h(n) lan truoc', 'h o buoc truoc',          CLR_H_NBR),
-            ('h(n) min nbr',   'h nho nhat neighbor',     CLR_H_NBR),
-            ('So buoc',        'Buoc thuc te',             CLR_STEPS),
+            ('Thuat toan',      '',                        CLR_ALGO),
+            ('Heuristic',       '',                        '#1565C0'),
+            ('h(n) hien tai',   'gia tri h hien tai',      CLR_H_CUR),
+            ('h(n) lan truoc',  'h o buoc truoc',          CLR_H_NBR),
+            ('h(n) min nbr',    'h nho nhat neighbor',     CLR_H_NBR),
+            ('So buoc',         'Buoc thuc te',             CLR_STEPS),
+            ('Restart / Iter',  'So lan khoi dong lai / vong lap', '#00897B'),
         ]
         for key, desc, clr in rows:
             rf = tk.Frame(inn, bg=LOC_BG); rf.pack(fill=tk.X, pady=2)
@@ -469,19 +766,11 @@ class LocalPanel(tk.Frame):
 
         # Algorithm pseudocode box
         tk.Frame(inn, bg=LOC_BDR, height=1).pack(fill=tk.X, pady=(10, 4))
-        box = tk.Text(inn, height=5, bg='#F0FFF8', fg=TXT_MID, font=self._F['mono'],
-                      relief='flat', wrap=tk.WORD, state=tk.DISABLED,
-                      padx=8, pady=6, highlightthickness=1, highlightbackground=LOC_BDR)
-        box.pack(fill=tk.X)
-        box.config(state=tk.NORMAL)
-        box.insert(tk.END,
-            "Simple Hill Climbing (logic goc):\n"
-            "  for action in Actions(current):\n"
-            "      child = node_child(action)\n"
-            "      if child.h < current.h:\n"
-            "          current = child; break\n"
-            "  else: dung (cuc tieu cuc bo / goal)")
-        box.config(state=tk.DISABLED)
+        self._pcode = tk.Text(inn, height=6, bg='#F0FFF8', fg=TXT_MID, font=self._F['mono'],
+                              relief='flat', wrap=tk.WORD, state=tk.DISABLED,
+                              padx=8, pady=6, highlightthickness=1, highlightbackground=LOC_BDR)
+        self._pcode.pack(fill=tk.X)
+        self.set_pseudocode('simplehc')
 
         tk.Frame(inn, bg=LOC_BDR, height=1).pack(fill=tk.X, pady=(8, 4))
         tk.Label(inn, text='Nhat Ky Tung Buoc', bg=LOC_BG, fg=LOC_BDR,
@@ -497,14 +786,23 @@ class LocalPanel(tk.Frame):
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
         hsb.pack(side=tk.BOTTOM, fill=tk.X)
         self._log.pack(fill=tk.BOTH, expand=True)
-        self._log.tag_config('step',  foreground='#1565C0')
-        self._log.tag_config('done',  foreground='#2E7D32')
-        self._log.tag_config('stuck', foreground='#C62828')
-        self._log.tag_config('info',  foreground='#6A1B9A')
+        self._log.tag_config('step',    foreground='#1565C0')
+        self._log.tag_config('done',    foreground='#2E7D32')
+        self._log.tag_config('stuck',   foreground='#C62828')
+        self._log.tag_config('info',    foreground='#6A1B9A')
+        self._log.tag_config('restart', foreground='#E65100')
+        self._log.tag_config('beam',    foreground='#00897B')
 
     # ── Public API ──────────────────────────────
     def set_status(self, text, clr=None):
         self._status.config(text=text, fg=clr or CLR_OK)
+
+    def set_pseudocode(self, fn_key):
+        code = ALGO_PSEUDOCODE.get(fn_key, '')
+        self._pcode.config(state=tk.NORMAL)
+        self._pcode.delete('1.0', tk.END)
+        self._pcode.insert(tk.END, code)
+        self._pcode.config(state=tk.DISABLED)
 
     def log_write(self, msg, tag=''):
         self._log.config(state=tk.NORMAL)
@@ -517,12 +815,15 @@ class LocalPanel(tk.Frame):
         self._log.delete('1.0', tk.END)
         self._log.config(state=tk.DISABLED)
 
-    def update_info(self, h_cur, h_prev, h_nbr_min, steps, heur_name):
+    def update_info(self, h_cur, h_prev, h_nbr_min, steps, heur_name,
+                    algo_name='—', extra='—'):
         self._cv['h(n) hien tai'].config(text=str(h_cur))
         self._cv['h(n) lan truoc'].config(text=str(h_prev) if h_prev is not None else '—')
         self._cv['h(n) min nbr'].config(text=str(h_nbr_min) if h_nbr_min is not None else '—')
         self._cv['So buoc'].config(text=str(steps))
         self._cv['Heuristic'].config(text=heur_name)
+        self._cv['Thuat toan'].config(text=algo_name)
+        self._cv['Restart / Iter'].config(text=str(extra))
 
     def reset(self):
         for k in self._cv: self._cv[k].config(text='—')
@@ -539,16 +840,19 @@ class App(tk.Tk):
         self.title('8-Puzzle Solver — Informed & Local Search')
         self.configure(bg=ROOT_BG)
         self.resizable(True, True)
-        self.minsize(1040, 610)
+        self.minsize(1080, 620)
 
         self._start   = copy.deepcopy(DEFAULT_START)
         self._goal    = copy.deepcopy(DEFAULT_GOAL)
         self._cur     = copy.deepcopy(DEFAULT_START)
         self._running = False
-        self._prev_h  = None          # for SHC step tracking
+        self._prev_h  = None          # for step tracking
+        self._restart_cnt = 0         # for RRHC / Beam counters
 
-        self._type_var = tk.StringVar(value='Informed Search')
-        self._algo_var = tk.StringVar()
+        self._type_var  = tk.StringVar(value='Informed Search')
+        self._algo_var  = tk.StringVar()
+        self._heur_var  = tk.StringVar(value='Misplaced Tiles')  # CB3
+        self._beam_k    = tk.IntVar(value=3)                      # Beam width
 
         self._F = {
             'ttl':  ('Segoe UI', 13, 'bold'),
@@ -642,9 +946,20 @@ class App(tk.Tk):
         tk.Label(hdr, text='Thuat toan:', bg=HDR_BG, fg='#7DD4FC',
                  font=self.F_BODY).pack(side=tk.LEFT, padx=(8, 2))
         self._cb2 = ttk.Combobox(hdr, textvariable=self._algo_var,
-                                  state='readonly', font=self.F_BODY, width=26)
+                                  state='readonly', font=self.F_BODY, width=18)
         self._cb2.pack(side=tk.LEFT, pady=10)
         self._cb2.bind('<<ComboboxSelected>>', lambda e: self._on_algo_change())
+
+        self._vsep(hdr)
+
+        # ComboBox 3 — Heuristic
+        tk.Label(hdr, text='Heuristic:', bg=HDR_BG, fg='#7DD4FC',
+                 font=self.F_BODY).pack(side=tk.LEFT, padx=(4, 2))
+        self._cb3 = ttk.Combobox(hdr, textvariable=self._heur_var,
+                                  values=list(HEURISTICS.keys()),
+                                  state='readonly', font=self.F_BODY, width=17)
+        self._cb3.pack(side=tk.LEFT, pady=10)
+        self._cb3.bind('<<ComboboxSelected>>', lambda e: self._on_heur_change())
 
         self._vsep(hdr)
 
@@ -666,6 +981,7 @@ class App(tk.Tk):
         # Local-only stats frame (hidden by default)
         self._loc_sf = tk.Frame(sf, bg=HDR_BG)
         self._lbl_h  = self._badge(self._loc_sf, 'h(n)', '—', CLR_H_CUR)
+        self._lbl_rst = self._badge(self._loc_sf, 'Restart', '—', CLR_WARN)
 
     # ─────────────────────────────────────────
     #  LEFT — SKY BLUE (boards)
@@ -716,7 +1032,6 @@ class App(tk.Tk):
 
         bf = tk.Frame(inner, bg=SKY_BG)
         bf.grid(row=2, column=0, columnspan=2, pady=(8, 0), sticky='w', padx=6)
-        self._btn(bf, 'Ngau Nhien', BTN_RAND, self._randomize).pack(side=tk.LEFT)
 
     # ─────────────────────────────────────────
     #  LEFT — MINT (animated board + path)
@@ -895,14 +1210,55 @@ class App(tk.Tk):
     def _on_algo_change(self):
         algo_name = self._algo_var.get()
         if not algo_name: return
-        fn_key, heur_key = ALGO_MAP.get(algo_name, ('greedy', 'misplaced'))
+        fn_key = ALGO_FN_KEY.get(algo_name, 'greedy')
+        heur_key = 'manhattan' if self._heur_var.get() == 'Manhattan Distance' else 'misplaced'
         stype = self._type_var.get()
+        # --- UX: soft-reset log/path/stats, giu nguyen start state ---
+        self._soft_reset(fn_key, heur_key, algo_name, stype)
+
+    def _on_heur_change(self):
+        """CB3 change: soft-reset roi cap nhat panel, giu nguyen start state."""
+        algo_name = self._algo_var.get()
+        fn_key    = ALGO_FN_KEY.get(algo_name, 'greedy')
+        heur_key  = 'manhattan' if self._heur_var.get() == 'Manhattan Distance' else 'misplaced'
+        stype     = self._type_var.get()
+        self._soft_reset(fn_key, heur_key, algo_name, stype)
+
+    def _soft_reset(self, fn_key, heur_key, algo_name, stype):
+        """
+        Xoa log / duong di / stats / trang thai hien tai ve start,
+        NHUNG giu nguyen start-state entries de user click Giai luon.
+        Neu dang chay thi dung thread cu truoc.
+        """
+        # Dung thread dang chay (neu co)
+        self._running = False
+
+        # Reset board hien tai ve start (khong thay doi o nhap)
+        self._cur    = copy.deepcopy(self._start)
+        self._prev_h = None
+        self._restart_cnt = 0
+        self._update_cur_board(self._cur)
+
+        # Xoa duong di
+        self._clear_path()
+        tk.Label(self._pi, text='Chua co duong di...',
+                 bg=MNT_BG, fg=TXT_DIM, font=self.F_BODY).pack(padx=20, pady=16)
+
+        # Reset badges
+        self._lbl_stp.config(text='—')
+        self._lbl_frn.config(text='0')
+        self._lbl_exp.config(text='0')
+        self._lbl_h.config(text='—')
+        self._lbl_rst.config(text='—')
+
+        # Reset right panel theo loai
         if stype == 'Informed Search':
             self._inf_panel.reset(fn_key, heur_key)
         else:
             self._loc_panel.reset()
-            self._loc_panel._cv['Heuristic'].config(
-                text='Misplaced Tiles' if heur_key == 'misplaced' else 'Manhattan Distance')
+            self._loc_panel._cv['Heuristic'].config(text=self._heur_var.get())
+            self._loc_panel._cv['Thuat toan'].config(text=algo_name)
+            self._loc_panel.set_pseudocode(fn_key)
 
     def _swap_panel(self, stype):
         if stype == 'Informed Search':
@@ -926,18 +1282,18 @@ class App(tk.Tk):
     #  USER ACTIONS
     # ─────────────────────────────────────────
     def _randomize(self):
-        nums = list(range(9)); random.shuffle(nums)
-        self._start = [nums[:3], nums[3:6], nums[6:]]
+        self._start = random_start_state()
         self._cur   = copy.deepcopy(self._start)
         self._refresh_start_entries()
         self._update_cur_board(self._cur)
 
     def _reset(self):
         self._running = False
-        self._start   = copy.deepcopy(DEFAULT_START)
+        self._start   = random_start_state()
         self._goal    = copy.deepcopy(DEFAULT_GOAL)
-        self._cur     = copy.deepcopy(DEFAULT_START)
+        self._cur     = copy.deepcopy(self._start)
         self._prev_h  = None
+        self._restart_cnt = 0
         self._refresh_start_entries()
         self._update_cur_board(self._cur)
         self._clear_path()
@@ -947,9 +1303,11 @@ class App(tk.Tk):
         self._lbl_frn.config(text='0')
         self._lbl_exp.config(text='0')
         self._lbl_h.config(text='—')
+        self._lbl_rst.config(text='—')
         self._active_panel.set_status('San sang', CLR_OK)
         self._active_panel.log_clear()
-        fn_key, heur_key = ALGO_MAP.get(self._algo_var.get(), ('greedy', 'misplaced'))
+        fn_key = ALGO_FN_KEY.get(self._algo_var.get(), 'greedy')
+        heur_key = 'manhattan' if self._heur_var.get() == 'Manhattan Distance' else 'misplaced'
         if isinstance(self._active_panel, InformedPanel):
             self._active_panel.reset(fn_key, heur_key)
         else:
@@ -965,6 +1323,7 @@ class App(tk.Tk):
         self._start = parsed
         self._cur   = copy.deepcopy(parsed)
         self._prev_h = None
+        self._restart_cnt = 0
         self._update_cur_board(self._cur)
 
         if not is_solvable(self._start, self._goal):
@@ -973,17 +1332,18 @@ class App(tk.Tk):
             return
 
         algo_name = self._algo_var.get()
-        fn_key, heur_key = ALGO_MAP[algo_name]
-        hfn = HEURISTICS[
-            'Manhattan Distance' if heur_key == 'manhattan' else 'Misplaced Tiles']
-        fn  = ALGO_FN[fn_key]
+        fn_key    = ALGO_FN_KEY.get(algo_name, 'greedy')
+        heur_name = self._heur_var.get()
+        hfn       = HEURISTICS[heur_name]
+        fn        = ALGO_FN[fn_key]
 
         self._running = True
         self._clear_path()
         self._lbl_stp.config(text='0')
         self._active_panel.log_clear()
         self._active_panel.set_status('Dang chay...', CLR_WARN)
-        self._active_panel.log_write(f'[BAT DAU]  {algo_name}', 'info')
+        self._active_panel.log_write(
+            f'[BAT DAU]  {algo_name}  |  Heuristic: {heur_name}', 'info')
 
         if isinstance(self._active_panel, InformedPanel):
             self._inf_panel.update_costs(None, fn_key)
@@ -992,9 +1352,17 @@ class App(tk.Tk):
 
         start = copy.deepcopy(self._start)
         goal  = copy.deepcopy(self._goal)
-        threading.Thread(target=fn,
-                         args=(start, goal, hfn, self._cb),
-                         daemon=True).start()
+
+        # Local Beam Search can bia tri k
+        if fn_key == 'beamsearch':
+            threading.Thread(target=fn,
+                             args=(start, goal, hfn, self._cb),
+                             kwargs={'k': self._beam_k.get()},
+                             daemon=True).start()
+        else:
+            threading.Thread(target=fn,
+                             args=(start, goal, hfn, self._cb),
+                             daemon=True).start()
 
     # ─────────────────────────────────────────
     #  UNIFIED CALLBACK
@@ -1011,32 +1379,75 @@ class App(tk.Tk):
             time.sleep(0.05)
 
         elif event == 'done':
-            path = data['path']; exp = data.get('exp', 0); frn = data.get('frn', 0)
-            steps = len(path) - 1
-            self.after(0, lambda p=path, e=exp, f=frn, s=steps:
-                       self._on_done_inf(p, e, f, s))
+            path  = data['path']
+            exp   = data.get('exp', 0)
+            frn   = data.get('frn', 0)
+            steps = data.get('steps', len(path) - 1)
+            rst   = data.get('restarts', data.get('iterations', None))
+            self.after(0, lambda p=path, e=exp, f=frn, s=steps, r=rst:
+                       self._on_done(p, e, f, s, r))
 
         elif event == 'fail':
-            exp = data['exp']
-            self.after(0, lambda e=exp: self._on_fail_inf(e))
+            exp = data.get('exp', 0)
+            self.after(0, lambda e=exp: self._on_fail(e))
 
-        # ── Local Search events ─────────────
+        # ── Local Search — generic step ─────
+        elif event == 'loc_step':
+            node  = data['node']; steps = data['steps']
+            nhs   = data['neighbors_h']
+            algo  = data.get('algo', '—')
+            self.after(0, lambda n=node, s=steps, nh=nhs, a=algo:
+                       self._loc_step(n, s, nh, a))
+
+        # ── Simple HC (legacy) ──────────────
         elif event == 'shc_step':
             node = data['node']; steps = data['steps']; nhs = data['neighbors_h']
             self.after(0, lambda n=node, s=steps, nh=nhs:
-                       self._shc_step(n, s, nh))
+                       self._loc_step(n, s, nh, 'Simple HC'))
 
         elif event == 'shc_stuck':
             path = data['path']; node = data['node']
             steps = data['steps']; nhs = data['neighbors_h']
             self.after(0, lambda p=path, n=node, s=steps, nh=nhs:
-                       self._on_shc_stuck(p, n, s, nh))
+                       self._on_loc_stuck(p, n, s, nh))
+
+        # ── Random Restart HC ───────────────
+        elif event == 'rrhc_restart':
+            node = data['node']; restart = data['restart']
+            self.after(0, lambda n=node, r=restart:
+                       self._rrhc_restart(n, r))
+
+        elif event == 'rrhc_local_stuck':
+            node = data['node']; restart = data['restart']
+            steps = data['steps']; nhs = data['neighbors_h']
+            self.after(0, lambda n=node, r=restart, s=steps, nh=nhs:
+                       self._rrhc_local_stuck(n, r, s, nh))
+
+        elif event == 'rrhc_fail':
+            rst = data['restarts']
+            self.after(0, lambda r=rst: self._rrhc_fail(r))
+
+        # ── Local Beam Search ───────────────
+        elif event == 'beam_init':
+            nodes = data['nodes']; k = data['k']
+            self.after(0, lambda ns=nodes, kk=k: self._beam_init(ns, kk))
+
+        elif event == 'beam_step':
+            nodes = data['nodes']; k = data['k']
+            it    = data['iteration']; h_vals = data['h_vals']
+            self.after(0, lambda ns=nodes, kk=k, i=it, hv=h_vals:
+                       self._beam_step(ns, kk, i, hv))
+
+        elif event == 'beam_fail':
+            it = data['iteration']
+            self.after(0, lambda i=it: self._beam_fail(i))
+        return None
 
     # ── Informed handlers ──────────────────
     def _inf_explore(self, node, exp, frn, limit):
         self._update_cur_board(node['state'])
         algo_name = self._algo_var.get()
-        fn_key, _ = ALGO_MAP.get(algo_name, ('greedy', 'misplaced'))
+        fn_key = ALGO_FN_KEY.get(algo_name, 'greedy')
         self._inf_panel.update_costs(node, fn_key, limit)
         self._lbl_exp.config(text=str(exp))
         self._lbl_frn.config(text=str(frn))
@@ -1047,24 +1458,40 @@ class App(tk.Tk):
         if fn_key == 'idastar' and limit is not None: msg += f'  lim={limit}'
         self._inf_panel.log_write(msg, 'explore')
 
-    def _on_done_inf(self, path, exp, frn, steps):
+    def _on_done(self, path, exp, frn, steps, rst):
         self._running = False
         self._lbl_stp.config(text=str(steps))
-        self._lbl_exp.config(text=str(exp))
-        self._lbl_frn.config(text=str(frn))
-        self._inf_panel.set_status(f'Tim thay!  {steps} buoc', CLR_OK)
-        self._inf_panel.log_write(f'\n[XONG]  {steps} buoc — {exp} nodes\n', 'done')
+        if isinstance(self._active_panel, InformedPanel):
+            self._lbl_exp.config(text=str(exp))
+            self._lbl_frn.config(text=str(frn))
+            self._inf_panel.set_status(f'Tim thay!  {steps} buoc', CLR_OK)
+            self._inf_panel.log_write(f'\n[XONG]  {steps} buoc — {exp} nodes\n', 'done')
+        else:
+            rst_str = f'{rst}' if rst is not None else '—'
+            self._lbl_rst.config(text=rst_str)
+            self._loc_panel.set_status(f'Tim thay!  {steps} buoc', CLR_OK)
+            extra = f'rst={rst}' if rst is not None else ''
+            self._loc_panel.log_write(
+                f'\n[XONG]  {steps} buoc  {extra}\n', 'done')
+            self._loc_panel._cv['So buoc'].config(text=str(steps))
+            if rst is not None:
+                self._loc_panel._cv['Restart / Iter'].config(text=str(rst))
         self._show_path(path)
         self._animate(path)
 
-    def _on_fail_inf(self, exp):
+    def _on_fail(self, exp):
         self._running = False
-        self._lbl_exp.config(text=str(exp))
-        self._inf_panel.set_status('Khong tim thay duong di!', CLR_FAIL)
-        self._inf_panel.log_write(f'\n[THAT BAI]  {exp} nodes, khong co duong di.\n', 'fail')
+        if isinstance(self._active_panel, InformedPanel):
+            self._lbl_exp.config(text=str(exp))
+            self._inf_panel.set_status('Khong tim thay duong di!', CLR_FAIL)
+            self._inf_panel.log_write(
+                f'\n[THAT BAI]  {exp} nodes, khong co duong di.\n', 'fail')
+        else:
+            self._loc_panel.set_status('Khong tim thay duong di!', CLR_FAIL)
+            self._loc_panel.log_write('\n[THAT BAI]  Khong co duong di.\n', 'stuck')
 
-    # ── Local Search handlers ──────────────
-    def _shc_step(self, node, steps, nbrs_h):
+    # ── Local Search — generic step handler ─
+    def _loc_step(self, node, steps, nbrs_h, algo_name):
         st = node.state; h = node.h_cost
         hi = None
         if steps > 0:
@@ -1075,10 +1502,10 @@ class App(tk.Tk):
         self._cur = st
         self._update_cur_board(st, hi)
         h_nbr_min = min(nbrs_h) if nbrs_h else None
-        heur_name = ('Misplaced Tiles'
-                     if ALGO_MAP.get(self._algo_var.get(), ('', 'misplaced'))[1] == 'misplaced'
-                     else 'Manhattan Distance')
-        self._loc_panel.update_info(h, self._prev_h, h_nbr_min, steps, heur_name)
+        heur_name = self._heur_var.get()
+        self._loc_panel.update_info(h, self._prev_h, h_nbr_min, steps, heur_name,
+                                    algo_name=algo_name,
+                                    extra=self._restart_cnt)
         self._lbl_h.config(text=str(h))
         self._lbl_stp.config(text=str(steps))
         act = node.action or 'Start'
@@ -1087,7 +1514,7 @@ class App(tk.Tk):
         self._loc_panel.log_write(msg, 'step')
         self._prev_h = h
 
-    def _on_shc_stuck(self, path, node, steps, nbrs_h):
+    def _on_loc_stuck(self, path, node, steps, nbrs_h):
         self._running = False
         h = node.h_cost
         self._lbl_stp.config(text=str(steps))
@@ -1099,6 +1526,74 @@ class App(tk.Tk):
             f'       Khong co neighbor nao co h < {h}.\n', 'stuck')
         self._show_path(path, stuck=True)
         self._animate(path)
+
+    # ── Random Restart HC handlers ──────────
+    def _rrhc_restart(self, node, restart_idx):
+        self._restart_cnt = restart_idx
+        self._lbl_rst.config(text=str(restart_idx))
+        self._loc_panel._cv['Restart / Iter'].config(text=str(restart_idx))
+        h = node.h_cost
+        self._lbl_h.config(text=str(h))
+        heur_name = self._heur_var.get()
+        self._loc_panel.update_info(h, None, None, node.step, heur_name,
+                                    algo_name='Random Restart HC',
+                                    extra=f'restart #{restart_idx}')
+        self._loc_panel.log_write(
+            f'\n--- [Khoi dong lai #{restart_idx}] ---  h_start={h}', 'restart')
+        self._update_cur_board(node.state)
+
+    def _rrhc_local_stuck(self, node, restart_idx, steps, nbrs_h):
+        h = node.h_cost
+        nbr_str = str(sorted(nbrs_h)) if nbrs_h else '[]'
+        self._loc_panel.log_write(
+            f'  [Ket cuc bo]  h={h}  buoc={steps}  nbrs={nbr_str}', 'stuck')
+
+    def _rrhc_fail(self, restarts):
+        self._running = False
+        self._loc_panel.set_status(f'That bai sau {restarts} lan khoi dong!', CLR_FAIL)
+        self._loc_panel.log_write(
+            f'\n[THAT BAI]  Sau {restarts} lan khoi dong lai, khong tim duoc dich.\n', 'stuck')
+
+    # ── Local Beam Search handlers ──────────
+    def _beam_init(self, nodes, k):
+        h0 = nodes[0].h_cost if nodes else '?'
+        heur_name = self._heur_var.get()
+        self._loc_panel.update_info(h0, None, None, 0, heur_name,
+                                    algo_name='Local Beam Search',
+                                    extra=f'k={k}, iter=0')
+        self._lbl_h.config(text=str(h0))
+        self._loc_panel.log_write(
+            f'[Khoi dau]  k={k}  h_start={h0}', 'beam')
+        if nodes: self._update_cur_board(nodes[0].state)
+
+    def _beam_step(self, nodes, k, iteration, h_vals):
+        best = nodes[0]
+        h    = best.h_cost
+        hi   = None
+        prev = self._cur
+        for i in range(3):
+            for j in range(3):
+                if prev[i][j] != best.state[i][j] and best.state[i][j] != 0:
+                    hi = (i, j)
+        self._cur = best.state
+        self._update_cur_board(best.state, hi)
+        heur_name = self._heur_var.get()
+        self._loc_panel.update_info(h, self._prev_h, min(h_vals), best.step, heur_name,
+                                    algo_name='Local Beam Search',
+                                    extra=f'k={k}, iter={iteration}')
+        self._lbl_h.config(text=str(h))
+        self._lbl_stp.config(text=str(best.step))
+        self._lbl_rst.config(text=str(iteration))
+        self._loc_panel._cv['Restart / Iter'].config(text=str(iteration))
+        self._loc_panel.log_write(
+            f'[Vong {iteration:>3}]  k={k}  h_vals={h_vals}  best_h={h}', 'beam')
+        self._prev_h = h
+
+    def _beam_fail(self, iteration):
+        self._running = False
+        self._loc_panel.set_status(f'That bai sau {iteration} vong lap!', CLR_FAIL)
+        self._loc_panel.log_write(
+            f'\n[THAT BAI]  Sau {iteration} vong lap, khong tim duoc dich.\n', 'stuck')
 
 
 # ═══════════════════════════════════════════════════════════
