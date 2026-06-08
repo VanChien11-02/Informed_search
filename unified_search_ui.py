@@ -2,10 +2,6 @@ import copy, heapq, math, tkinter as tk
 from tkinter import ttk, messagebox
 import threading, time, random
 
-# ═══════════════════════════════════════════════════════════
-#  SHARED UTILITIES
-# ═══════════════════════════════════════════════════════════
-
 def random_start_state():
     nums  = list(range(9))
     random.shuffle(nums)
@@ -73,6 +69,146 @@ def trace_path_obj0(node):
         n = n.parent
     path.reverse()
     return path
+
+# ═══════════════════════════════════════════════════════════
+#  UNINFORMED SEARCH ALGORITHMS
+# ═══════════════════════════════════════════════════════════
+
+def bfs_search(start, goal, hfn, cb):
+    """BFS — Breadth-First Search (port tu BFS.py)."""
+    from collections import deque
+    root = {'state': start, 'parent': None, 'action': None, 'g': 0}
+    if start == goal:
+        cb('done', {'path': [{'state': start, 'action': None}], 'exp': 0, 'frn': 0}); return
+    frontier = deque([root])
+    frontier_set = {state_to_tuple(start)}
+    explored = set()
+    exp = 0
+    while frontier:
+        if not cb('alive', {}): return
+        cur = frontier.popleft()
+        ct  = state_to_tuple(cur['state'])
+        frontier_set.discard(ct)
+        explored.add(ct); exp += 1
+        cb('unf_explore', {'node': cur, 'exp': exp, 'frn': len(frontier), 'algo': 'BFS'})
+        time.sleep(0.02)
+        for a in get_actions(cur['state']):
+            ns = do_move(cur['state'], a)
+            nt = state_to_tuple(ns)
+            if nt not in explored and nt not in frontier_set:
+                child = {'state': ns, 'parent': cur, 'action': a, 'g': cur['g']+1}
+                if ns == goal:
+                    cb('done', {'path': trace_path_dict(child),
+                                'exp': exp, 'frn': len(frontier)}); return
+                frontier.append(child)
+                frontier_set.add(nt)
+    cb('fail', {'exp': exp})
+
+
+def dfs_search(start, goal, hfn, cb):
+    """DFS — Depth-First Search (port tu DFS.py, stack-based, cycle check)."""
+    root = {'state': start, 'parent': None, 'action': None, 'g': 0}
+    frontier = [root]
+    frontier_set = {state_to_tuple(start)}
+    explored = set()
+    exp = 0
+    while frontier:
+        if not cb('alive', {}): return
+        cur = frontier.pop()
+        ct  = state_to_tuple(cur['state'])
+        frontier_set.discard(ct)
+        if ct in explored: continue
+        explored.add(ct); exp += 1
+        cb('unf_explore', {'node': cur, 'exp': exp, 'frn': len(frontier), 'algo': 'DFS'})
+        time.sleep(0.02)
+        if cur['state'] == goal:
+            cb('done', {'path': trace_path_dict(cur),
+                        'exp': exp, 'frn': len(frontier)}); return
+        for a in get_actions(cur['state']):
+            ns = do_move(cur['state'], a)
+            nt = state_to_tuple(ns)
+            if nt not in explored and nt not in frontier_set:
+                child = {'state': ns, 'parent': cur, 'action': a, 'g': cur['g']+1}
+                frontier.append(child)
+                frontier_set.add(nt)
+    cb('fail', {'exp': exp})
+
+
+def ids_search(start, goal, hfn, cb):
+    """IDS — Iterative Deepening Search (port tu iteraive_deepening_search.py)."""
+    exp_total = [0]
+    depth = 0
+
+    def depth_limited(problem_state, limit):
+        root = {'state': problem_state, 'parent': None, 'action': None, 'g': 0}
+        frontier = [root]
+        explored = {state_to_tuple(root['state']): 0}
+        cutoff_occurred = False
+        while frontier:
+            if not cb('alive', {}): return 'stop', None
+            cur = frontier.pop()
+            ct  = state_to_tuple(cur['state'])
+            exp_total[0] += 1
+            cb('unf_explore', {'node': cur, 'exp': exp_total[0],
+                               'frn': len(frontier), 'algo': 'IDS',
+                               'depth': cur['g'], 'limit': limit})
+            time.sleep(0.02)
+            if cur['state'] == goal:
+                return 'found', trace_path_dict(cur)
+            if cur['g'] >= limit:
+                cutoff_occurred = True
+                continue
+            for a in get_actions(cur['state']):
+                ns  = do_move(cur['state'], a)
+                nt  = state_to_tuple(ns)
+                ng  = cur['g'] + 1
+                if nt not in explored or ng < explored[nt]:
+                    explored[nt] = ng
+                    child = {'state': ns, 'parent': cur, 'action': a, 'g': ng}
+                    frontier.append(child)
+        return ('cutoff', None) if cutoff_occurred else ('fail', None)
+
+    while True:
+        res, val = depth_limited(start, depth)
+        if res == 'found':
+            cb('done', {'path': val, 'exp': exp_total[0], 'frn': 0,
+                        'depth': depth}); return
+        if res == 'stop': return
+        if res == 'fail':
+            cb('fail', {'exp': exp_total[0]}); return
+        depth += 1
+
+
+def ucs_search(start, goal, hfn, cb):
+    """UCS — Uniform Cost Search (port tu UCS.py).
+    Trong 8-puzzle moi buoc co cost = 1 nen UCS tuong duong BFS,
+    nhung van dung priority queue theo path_cost."""
+    root = {'state': start, 'parent': None, 'action': None, 'g': 0}
+    heap = [(0, 0, root)]
+    best = {state_to_tuple(start): 0}
+    cnt  = 0; exp = 0
+    while heap:
+        if not cb('alive', {}): return
+        cost, _, cur = heapq.heappop(heap)
+        ct = state_to_tuple(cur['state'])
+        if cost > best.get(ct, math.inf): continue   # outdated entry
+        exp += 1
+        cb('unf_explore', {'node': cur, 'exp': exp, 'frn': len(heap),
+                           'algo': 'UCS', 'cost': cur['g']})
+        time.sleep(0.02)
+        if cur['state'] == goal:
+            cb('done', {'path': trace_path_dict(cur),
+                        'exp': exp, 'frn': len(heap)}); return
+        for a in get_actions(cur['state']):
+            ns  = do_move(cur['state'], a)
+            nt  = state_to_tuple(ns)
+            ng  = cur['g'] + 1
+            if nt not in best or ng < best[nt]:
+                best[nt] = ng; cnt += 1
+                child = {'state': ns, 'parent': cur, 'action': a, 'g': ng}
+                heapq.heappush(heap, (ng, cnt, child))
+    cb('fail', {'exp': exp})
+
 
 # ═══════════════════════════════════════════════════════════
 #  INFORMED SEARCH ALGORITHMS
@@ -484,6 +620,74 @@ def local_beam_search_fn(start, goal, hfn, cb, k=3):
     cb('beam_fail', {'iteration': max_iterations})
 
 
+def simulated_annealing_search(start, goal, hfn, cb):
+    """
+    Simulated Annealing — port tu simulated_annealing.py.
+    T: nhiet do ban dau, lam nguoi theo ty le alpha moi buoc.
+    """
+    problem = LSProblem(start, goal)
+    current = LSNode(copy.deepcopy(start), goal, hfn)
+    T       = 100.0
+    T_min   = 0.5
+    alpha   = 0.97     # cooling rate
+    steps   = 0
+
+    while T > T_min:
+        if not cb('alive', {}): return
+        h_cur = current.h_cost
+
+        if problem.goal_test(current.state):
+            path = trace_path_obj0(current)
+            cb('done', {'path': path, 'steps': steps})
+            return
+
+        actions  = problem.Actions(current.state)
+        if not actions:
+            break
+        action   = random.choice(actions)
+        neighbor = _ls_child(problem, current, action)
+        delta    = neighbor.h_cost - h_cur   # delta > 0 = worse
+
+        if delta < 0:
+            accepted = True
+        else:
+            p        = math.exp(-delta / T) if T > 0 else 0
+            accepted = random.random() < p
+
+        nbrs_h = [_ls_child(problem, current, a).h_cost
+                  for a in problem.Actions(current.state)]
+
+        cb('sa_step', {
+            'node':     current,
+            'steps':    steps,
+            'T':        round(T, 3),
+            'delta':    delta,
+            'accepted': accepted,
+            'neighbor': neighbor,
+            'neighbors_h': nbrs_h,
+        })
+        time.sleep(0.08)
+
+        if accepted:
+            current = neighbor
+            steps  += 1
+
+        T *= alpha
+
+    # Het nhiet ma chua den dich
+    if problem.goal_test(current.state):
+        path = trace_path_obj0(current)
+        cb('done', {'path': path, 'steps': steps})
+    else:
+        path = trace_path_obj0(current)
+        cb('sa_frozen', {
+            'path':  path,
+            'node':  current,
+            'steps': steps,
+            'T':     round(T, 4),
+        })
+
+
 # ═══════════════════════════════════════════════════════════
 #  COLORS — Unified Professional Light Theme
 # ═══════════════════════════════════════════════════════════
@@ -502,6 +706,9 @@ GOAL_TILE = '#A5D6A7';  GOAL_TXT  = '#1B5E20';  GOAL_EM   = '#E8F5E9'
 MNT_BG    = '#E8FFF6';  MNT_BDR   = '#00897B'
 MNT_TILE  = '#80CBC4';  MNT_TXT   = '#004D40';  MNT_EM    = '#E8FFF6'
 MNT_ACT   = '#FF8F00'   # highlighted moving tile
+
+# Right panel — Uninformed Search (amber / deep-orange)
+UNF_BG    = '#FFF8E1';  UNF_BDR   = '#E65100';  UNF_LOG   = '#FFFDE7'
 
 # Right panel — Informed Search (indigo)
 INF_BG    = '#F0EEFF';  INF_BDR   = '#5C35C8';  INF_LOG   = '#FAF8FF'
@@ -532,6 +739,12 @@ HEURISTICS = {
 
 # CB2 — Thuat toan (khong chua heuristic nua)
 SEARCH_TYPES = {
+    'Uninformed Search': [
+        'BFS',
+        'DFS',
+        'IDS',
+        'UCS',
+    ],
     'Informed Search': [
         'Greedy',
         'A*',
@@ -543,22 +756,35 @@ SEARCH_TYPES = {
         'Stochastic HC',
         'Random Restart HC',
         'Local Beam Search',
+        'Simulated Annealing',
     ],
 }
 
-# Map algo name -> fn_key  (heuristic duoc doc tu CB3 rieng)
+# Map algo name -> fn_key
 ALGO_FN_KEY = {
+    # Uninformed
+    'BFS':                'bfs',
+    'DFS':                'dfs',
+    'IDS':                'ids',
+    'UCS':                'ucs',
+    # Informed
     'Greedy':             'greedy',
     'A*':                 'astar',
     'IDA*':               'idastar',
+    # Local
     'Simple HC':          'simplehc',
     'Steepest Ascent HC': 'steepesthc',
     'Stochastic HC':      'stochastichc',
     'Random Restart HC':  'rrhc',
     'Local Beam Search':  'beamsearch',
+    'Simulated Annealing':'sa',
 }
 
 ALGO_FN = {
+    'bfs':          bfs_search,
+    'dfs':          dfs_search,
+    'ids':          ids_search,
+    'ucs':          ucs_search,
     'greedy':       greedy_search,
     'astar':        astar_search,
     'idastar':      idastar_search,
@@ -567,58 +793,110 @@ ALGO_FN = {
     'stochastichc': stochastic_hc_search,
     'rrhc':         random_restart_hc_search,
     'beamsearch':   local_beam_search_fn,
+    'sa':           simulated_annealing_search,
 }
+
+# Nhom thuat toan theo loai
+UNINFORMED_KEYS = {'bfs', 'dfs', 'ids', 'ucs'}
+INFORMED_KEYS   = {'greedy', 'astar', 'idastar'}
+LOCAL_KEYS      = {'simplehc', 'steepesthc', 'stochastichc', 'rrhc', 'beamsearch', 'sa'}
 
 # Pseudocode cho tung thuat toan local search
-ALGO_PSEUDOCODE = {
-    'simplehc': (
-        "Simple Hill Climbing:\n"
-        "  for action in Actions(current):\n"
-        "      child = node_child(action)\n"
-        "      if child.h <= current.h:\n"
-        "          current = child; break\n"
-        "  else: dung (cuc tieu cuc bo / goal)"
-    ),
-    'steepesthc': (
-        "Steepest Ascent HC:\n"
-        "  for action in Actions(current):\n"
-        "      neighbor = node_child(action)\n"
-        "      if neighbor.h <= current.h:\n"
-        "          push(better_neighbors, neighbor)\n"
-        "  if better_neighbors empty: dung\n"
-        "  else: current = best(better_neighbors)"
-    ),
-    'stochastichc': (
-        "Stochastic HC:\n"
-        "  for action in Actions(current):\n"
-        "      if neighbor.h <= current.h:\n"
-        "          better.append(neighbor)\n"
-        "  if better empty: dung\n"
-        "  current = random.choice(better)"
-    ),
-    'rrhc': (
-        "Random Restart HC:\n"
-        "  for restart in range(MAX_RESTART=10):\n"
-        "      current = random_start()\n"
-        "      run SimpleHC(current)\n"
-        "      if goal found: return\n"
-        "  return FAIL"
-    ),
-    'beamsearch': (
-        "Local Beam Search (k beams):\n"
-        "  current_set = [start] (k states)\n"
-        "  loop:\n"
-        "      all_nbrs = expand all states in set\n"
-        "      if goal in all_nbrs: return\n"
-        "      current_set = best k of all_nbrs"
-    ),
-}
-
-DEFAULT_START = [[2, 1, 4], [7, 0, 6], [5, 3, 8]]
+DEFAULT_START = [[1,2,3],
+              [4,0,6],
+              [7,5,8]]
 DEFAULT_GOAL  = [[1, 2, 3], [4, 5, 6], [7, 8, 0]]
 
-# ═══════════════════════════════════════════════════════════
-#  INFORMED PANEL  (UserControl cho Informed Search)
+class UniformedPanel(tk.Frame):
+    def __init__(self, parent, F):
+        super().__init__(parent, bg=UNF_BG,
+                         highlightbackground=UNF_BDR, highlightthickness=2)
+        self._F = F
+        self._build()
+
+    def _build(self):
+        tk.Frame(self, bg=UNF_BDR, height=3).pack(fill=tk.X)
+        inn = tk.Frame(self, bg=UNF_BG)
+        inn.pack(fill=tk.BOTH, expand=True, padx=12, pady=8)
+
+        tk.Label(inn, text='Uninformed Search — Thong Tin',
+                 bg=UNF_BG, fg=UNF_BDR, font=self._F['hdr']).pack(anchor='w')
+
+        self._cv = {}
+        rows = [
+            ('Thuat toan', '',                  CLR_ALGO),
+            ('Depth / Cost', 'do sau / chi phi', '#E65100'),
+            ('Explored',    'da duyet',          CLR_EXP),
+            ('Frontier',    'hang doi hien tai', CLR_FRN),
+            ('Steps',       'buoc trong duong di', CLR_STEPS),
+        ]
+        for key, desc, clr in rows:
+            rf = tk.Frame(inn, bg=UNF_BG); rf.pack(fill=tk.X, pady=2)
+            tk.Label(rf, text=f'{key}:', bg=UNF_BG, fg=TXT_MID,
+                     font=self._F['stat'], width=14, anchor='w').pack(side=tk.LEFT)
+            tk.Label(rf, text=desc, bg=UNF_BG, fg=TXT_DIM,
+                     font=self._F['stat']).pack(side=tk.LEFT)
+            v = tk.Label(rf, text='—', bg=UNF_BG, fg=clr, font=self._F['bdge'])
+            v.pack(side=tk.RIGHT)
+            self._cv[key] = v
+
+        self._status = tk.Label(inn, text='San sang', bg=UNF_BG,
+                                fg=CLR_OK, font=self._F['hdr'])
+        self._status.pack(anchor='w', pady=(6, 0))
+
+        tk.Frame(inn, bg=UNF_BDR, height=1).pack(fill=tk.X, pady=(10, 4))
+        tk.Label(inn, text='Nhat Ky Kham Pha', bg=UNF_BG, fg=UNF_BDR,
+                 font=self._F['hdr']).pack(anchor='w', pady=(0, 4))
+
+        lf = tk.Frame(inn, bg=UNF_BG); lf.pack(fill=tk.BOTH, expand=True)
+        self._log = tk.Text(lf, bg=UNF_LOG, fg=TXT_DARK, font=self._F['mono'],
+                            relief='flat', wrap=tk.NONE, state=tk.DISABLED,
+                            highlightthickness=1, highlightbackground=UNF_BDR)
+        vsb = tk.Scrollbar(lf, orient=tk.VERTICAL, command=self._log.yview)
+        hsb = tk.Scrollbar(lf, orient=tk.HORIZONTAL, command=self._log.xview)
+        self._log.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        hsb.pack(side=tk.BOTTOM, fill=tk.X)
+        self._log.pack(fill=tk.BOTH, expand=True)
+        self._log.tag_config('explore', foreground='#BF360C')
+        self._log.tag_config('done',    foreground='#2E7D32')
+        self._log.tag_config('fail',    foreground='#C62828')
+        self._log.tag_config('info',    foreground='#E65100')
+        self._log.tag_config('depth',   foreground='#6A1B9A')
+
+    _PSEUDOCODES = {}
+
+    # -- Public API --
+    def set_status(self, text, clr=None):
+        self._status.config(text=text, fg=clr or CLR_OK)
+
+    def set_pseudocode(self, fn_key):   # kept for compat, no-op
+        pass
+
+    def log_write(self, msg, tag=''):
+        self._log.config(state=tk.NORMAL)
+        self._log.insert(tk.END, msg + '\n', tag)
+        self._log.see(tk.END)
+        self._log.config(state=tk.DISABLED)
+
+    def log_clear(self):
+        self._log.config(state=tk.NORMAL)
+        self._log.delete('1.0', tk.END)
+        self._log.config(state=tk.DISABLED)
+
+    def update_info(self, algo, depth_or_cost, exp, frn, steps):
+        self._cv['Thuat toan'].config(text=algo)
+        self._cv['Depth / Cost'].config(text=str(depth_or_cost))
+        self._cv['Explored'].config(text=str(exp))
+        self._cv['Frontier'].config(text=str(frn))
+        self._cv['Steps'].config(text=str(steps))
+
+    def reset(self, fn_key='bfs'):
+        for k in self._cv: self._cv[k].config(text='—')
+        self._status.config(text='San sang', fg=CLR_OK)
+        self.log_clear()
+
+
 # ═══════════════════════════════════════════════════════════
 class InformedPanel(tk.Frame):
     def __init__(self, parent, F):
@@ -723,9 +1001,6 @@ class InformedPanel(tk.Frame):
         self.update_desc(algo_type, heur_type)
 
 
-# ═══════════════════════════════════════════════════════════
-#  LOCAL PANEL  (UserControl cho Local Search)
-# ═══════════════════════════════════════════════════════════
 class LocalPanel(tk.Frame):
     def __init__(self, parent, F):
         super().__init__(parent, bg=LOC_BG,
@@ -764,14 +1039,6 @@ class LocalPanel(tk.Frame):
         self._status = tk.Label(inn, text='San sang', bg=LOC_BG, fg=CLR_OK, font=self._F['hdr'])
         self._status.pack(anchor='w', pady=(6, 0))
 
-        # Algorithm pseudocode box
-        tk.Frame(inn, bg=LOC_BDR, height=1).pack(fill=tk.X, pady=(10, 4))
-        self._pcode = tk.Text(inn, height=6, bg='#F0FFF8', fg=TXT_MID, font=self._F['mono'],
-                              relief='flat', wrap=tk.WORD, state=tk.DISABLED,
-                              padx=8, pady=6, highlightthickness=1, highlightbackground=LOC_BDR)
-        self._pcode.pack(fill=tk.X)
-        self.set_pseudocode('simplehc')
-
         tk.Frame(inn, bg=LOC_BDR, height=1).pack(fill=tk.X, pady=(8, 4))
         tk.Label(inn, text='Nhat Ky Tung Buoc', bg=LOC_BG, fg=LOC_BDR,
                  font=self._F['hdr']).pack(anchor='w', pady=(0, 4))
@@ -792,17 +1059,14 @@ class LocalPanel(tk.Frame):
         self._log.tag_config('info',    foreground='#6A1B9A')
         self._log.tag_config('restart', foreground='#E65100')
         self._log.tag_config('beam',    foreground='#00897B')
+        self._log.tag_config('sa',      foreground='#7B1FA2')
 
-    # ── Public API ──────────────────────────────
+    # -- Public API --
     def set_status(self, text, clr=None):
         self._status.config(text=text, fg=clr or CLR_OK)
 
-    def set_pseudocode(self, fn_key):
-        code = ALGO_PSEUDOCODE.get(fn_key, '')
-        self._pcode.config(state=tk.NORMAL)
-        self._pcode.delete('1.0', tk.END)
-        self._pcode.insert(tk.END, code)
-        self._pcode.config(state=tk.DISABLED)
+    def set_pseudocode(self, fn_key):   # kept for compat, no-op
+        pass
 
     def log_write(self, msg, tag=''):
         self._log.config(state=tk.NORMAL)
@@ -831,9 +1095,6 @@ class LocalPanel(tk.Frame):
         self.log_clear()
 
 
-# ═══════════════════════════════════════════════════════════
-#  MAIN APPLICATION
-# ═══════════════════════════════════════════════════════════
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -912,15 +1173,15 @@ class App(tk.Tk):
 
         self._inf_panel = InformedPanel(self._rc, self._F)
         self._loc_panel = LocalPanel(self._rc, self._F)
+        self._unf_panel = UniformedPanel(self._rc, self._F)
 
         self._inf_panel.grid(row=0, column=0, sticky='nsew')
         self._loc_panel.grid(row=0, column=0, sticky='nsew')
+        self._unf_panel.grid(row=0, column=0, sticky='nsew')
         self._loc_panel.grid_remove()   # hidden by default
+        self._unf_panel.grid_remove()   # hidden by default
         self._active_panel = self._inf_panel
 
-    # ─────────────────────────────────────────
-    #  HEADER
-    # ─────────────────────────────────────────
     def _build_header(self):
         hdr = tk.Frame(self, bg=HDR_BG, height=52)
         hdr.pack(fill=tk.X)
@@ -952,16 +1213,17 @@ class App(tk.Tk):
 
         self._vsep(hdr)
 
-        # ComboBox 3 — Heuristic
-        tk.Label(hdr, text='Heuristic:', bg=HDR_BG, fg='#7DD4FC',
-                 font=self.F_BODY).pack(side=tk.LEFT, padx=(4, 2))
+        # ComboBox 3 — Heuristic (an di khi Uninformed Search)
+        self._cb3_lbl = tk.Label(hdr, text='Heuristic:', bg=HDR_BG, fg='#7DD4FC',
+                                  font=self.F_BODY)
+        self._cb3_lbl.pack(side=tk.LEFT, padx=(4, 2))
         self._cb3 = ttk.Combobox(hdr, textvariable=self._heur_var,
                                   values=list(HEURISTICS.keys()),
                                   state='readonly', font=self.F_BODY, width=17)
         self._cb3.pack(side=tk.LEFT, pady=10)
         self._cb3.bind('<<ComboboxSelected>>', lambda e: self._on_heur_change())
-
-        self._vsep(hdr)
+        self._cb3_sep = tk.Frame(hdr, bg=HDR_LINE, width=1, height=30)
+        self._cb3_sep.pack(side=tk.LEFT, padx=8, pady=10)
 
         self._btn_solve = self._btn(hdr, 'Giai',  BTN_SOLVE, self._solve)
         self._btn_solve.pack(side=tk.LEFT, padx=4)
@@ -972,7 +1234,7 @@ class App(tk.Tk):
         sf.pack(side=tk.RIGHT, padx=10)
         self._lbl_stp = self._badge(sf, 'Steps', '—', CLR_STEPS)
 
-        # Informed-only stats frame
+        # Informed/Uniformed shared stats frame (Explored + Frontier)
         self._inf_sf = tk.Frame(sf, bg=HDR_BG)
         self._inf_sf.pack(side=tk.RIGHT)
         self._lbl_exp = self._badge(self._inf_sf, 'Explored', '0', CLR_EXP)
@@ -980,12 +1242,10 @@ class App(tk.Tk):
 
         # Local-only stats frame (hidden by default)
         self._loc_sf = tk.Frame(sf, bg=HDR_BG)
-        self._lbl_h  = self._badge(self._loc_sf, 'h(n)', '—', CLR_H_CUR)
+        self._lbl_h   = self._badge(self._loc_sf, 'h(n)', '—', CLR_H_CUR)
         self._lbl_rst = self._badge(self._loc_sf, 'Restart', '—', CLR_WARN)
 
-    # ─────────────────────────────────────────
     #  LEFT — SKY BLUE (boards)
-    # ─────────────────────────────────────────
     def _build_sky(self, parent):
         tk.Frame(parent, bg=SKY_BDR, height=3).pack(fill=tk.X)
         inner = tk.Frame(parent, bg=SKY_BG)
@@ -1033,9 +1293,7 @@ class App(tk.Tk):
         bf = tk.Frame(inner, bg=SKY_BG)
         bf.grid(row=2, column=0, columnspan=2, pady=(8, 0), sticky='w', padx=6)
 
-    # ─────────────────────────────────────────
     #  LEFT — MINT (animated board + path)
-    # ─────────────────────────────────────────
     def _build_mint(self, parent):
         tk.Frame(parent, bg=MNT_BDR, height=3).pack(fill=tk.X)
         inner = tk.Frame(parent, bg=MNT_BG)
@@ -1077,9 +1335,7 @@ class App(tk.Tk):
         tk.Label(self._pi, text='Chua co duong di...',
                  bg=MNT_BG, fg=TXT_DIM, font=self.F_BODY).pack(padx=20, pady=16)
 
-    # ─────────────────────────────────────────
     #  WIDGET HELPERS
-    # ─────────────────────────────────────────
     def _sec(self, parent, bg, bdr):
         return tk.Frame(parent, bg=bg, highlightbackground=bdr, highlightthickness=2)
 
@@ -1118,9 +1374,7 @@ class App(tk.Tk):
               foreground=[('readonly', CB_FG)],
               background=[('readonly', CB_BG)])
 
-    # ─────────────────────────────────────────
     #  BOARD HELPERS
-    # ─────────────────────────────────────────
     def _refresh_start_entries(self):
         for i in range(3):
             for j in range(3):
@@ -1195,9 +1449,7 @@ class App(tk.Tk):
         if used != set(range(9)): messagebox.showerror('Loi', 'Can du so 0-8!'); return None
         return s
 
-    # ─────────────────────────────────────────
     #  COMBOBOX CHANGE HANDLERS
-    # ─────────────────────────────────────────
     def _on_type_change(self):
         stype = self._type_var.get()
         algos = SEARCH_TYPES[stype]
@@ -1205,6 +1457,15 @@ class App(tk.Tk):
         self._algo_var.set(algos[0])
         self._swap_panel(stype)
         self._update_stats_visibility(stype)
+        # An / hien CB3 Heuristic
+        if stype == 'Uninformed Search':
+            self._cb3_lbl.pack_forget()
+            self._cb3.pack_forget()
+            self._cb3_sep.pack_forget()
+        else:
+            self._cb3_lbl.pack(side=tk.LEFT, padx=(4, 2))
+            self._cb3.pack(side=tk.LEFT, pady=10)
+            self._cb3_sep.pack(side=tk.LEFT, padx=8, pady=10)
         self._on_algo_change()
 
     def _on_algo_change(self):
@@ -1252,7 +1513,9 @@ class App(tk.Tk):
         self._lbl_rst.config(text='—')
 
         # Reset right panel theo loai
-        if stype == 'Informed Search':
+        if stype == 'Uninformed Search':
+            self._unf_panel.reset(fn_key)
+        elif stype == 'Informed Search':
             self._inf_panel.reset(fn_key, heur_key)
         else:
             self._loc_panel.reset()
@@ -1261,26 +1524,29 @@ class App(tk.Tk):
             self._loc_panel.set_pseudocode(fn_key)
 
     def _swap_panel(self, stype):
-        if stype == 'Informed Search':
-            self._loc_panel.grid_remove()
+        # An tat ca panels truoc
+        self._unf_panel.grid_remove()
+        self._inf_panel.grid_remove()
+        self._loc_panel.grid_remove()
+        if stype == 'Uninformed Search':
+            self._unf_panel.grid()
+            self._active_panel = self._unf_panel
+        elif stype == 'Informed Search':
             self._inf_panel.grid()
             self._active_panel = self._inf_panel
         else:
-            self._inf_panel.grid_remove()
             self._loc_panel.grid()
             self._active_panel = self._loc_panel
 
     def _update_stats_visibility(self, stype):
-        if stype == 'Informed Search':
-            self._loc_sf.pack_forget()
-            self._inf_sf.pack(side=tk.RIGHT)
-        else:
+        if stype == 'Local Search':
             self._inf_sf.pack_forget()
             self._loc_sf.pack(side=tk.RIGHT)
+        else:  # Uninformed Search + Informed Search deu can Explored/Frontier
+            self._loc_sf.pack_forget()
+            self._inf_sf.pack(side=tk.RIGHT)
 
-    # ─────────────────────────────────────────
     #  USER ACTIONS
-    # ─────────────────────────────────────────
     def _randomize(self):
         self._start = random_start_state()
         self._cur   = copy.deepcopy(self._start)
@@ -1306,9 +1572,12 @@ class App(tk.Tk):
         self._lbl_rst.config(text='—')
         self._active_panel.set_status('San sang', CLR_OK)
         self._active_panel.log_clear()
-        fn_key = ALGO_FN_KEY.get(self._algo_var.get(), 'greedy')
+        fn_key   = ALGO_FN_KEY.get(self._algo_var.get(), 'greedy')
         heur_key = 'manhattan' if self._heur_var.get() == 'Manhattan Distance' else 'misplaced'
-        if isinstance(self._active_panel, InformedPanel):
+        stype    = self._type_var.get()
+        if stype == 'Uninformed Search':
+            self._unf_panel.reset(fn_key)
+        elif isinstance(self._active_panel, InformedPanel):
             self._active_panel.reset(fn_key, heur_key)
         else:
             self._active_panel.reset()
@@ -1342,18 +1611,26 @@ class App(tk.Tk):
         self._lbl_stp.config(text='0')
         self._active_panel.log_clear()
         self._active_panel.set_status('Dang chay...', CLR_WARN)
-        self._active_panel.log_write(
-            f'[BAT DAU]  {algo_name}  |  Heuristic: {heur_name}', 'info')
 
-        if isinstance(self._active_panel, InformedPanel):
+        if fn_key in UNINFORMED_KEYS:
+            self._active_panel.log_write(
+                f'[BAT DAU]  {algo_name}  (khong dung heuristic)', 'info')
+            self._lbl_exp.config(text='0')
+            self._lbl_frn.config(text='0')
+        elif isinstance(self._active_panel, InformedPanel):
+            self._active_panel.log_write(
+                f'[BAT DAU]  {algo_name}  |  Heuristic: {heur_name}', 'info')
             self._inf_panel.update_costs(None, fn_key)
             self._lbl_frn.config(text='0')
             self._lbl_exp.config(text='0')
+        else:
+            self._active_panel.log_write(
+                f'[BAT DAU]  {algo_name}  |  Heuristic: {heur_name}', 'info')
 
         start = copy.deepcopy(self._start)
         goal  = copy.deepcopy(self._goal)
 
-        # Local Beam Search can bia tri k
+        # Local Beam Search can bien so k
         if fn_key == 'beamsearch':
             threading.Thread(target=fn,
                              args=(start, goal, hfn, self._cb),
@@ -1370,8 +1647,18 @@ class App(tk.Tk):
     def _cb(self, event, data):
         if event == 'alive': return self._running
 
-        # ── Informed Search events ──────────
-        if event == 'explore':
+        # ── Uninformed Search events ──────────────
+        if event == 'unf_explore':
+            node  = data['node']; exp = data['exp']; frn = data['frn']
+            algo  = data.get('algo', '?')
+            depth = data.get('depth', data.get('cost', data.get('g', '—')))
+            lim   = data.get('limit', None)
+            self.after(0, lambda n=node, e=exp, f=frn, a=algo, d=depth, l=lim:
+                       self._unf_explore(n, e, f, a, d, l))
+            time.sleep(0.02)
+
+        # ── Informed Search events ──────────────
+        elif event == 'explore':
             node = data['node']; exp = data['exp']; frn = data['frn']
             lim  = data.get('limit')
             self.after(0, lambda n=node, e=exp, f=frn, l=lim:
@@ -1441,9 +1728,38 @@ class App(tk.Tk):
         elif event == 'beam_fail':
             it = data['iteration']
             self.after(0, lambda i=it: self._beam_fail(i))
+
+        # ── Simulated Annealing ────────────────────
+        elif event == 'sa_step':
+            node  = data['node']; steps = data['steps']
+            T     = data['T'];    delta = data['delta']
+            acc   = data['accepted']; nbrs_h = data['neighbors_h']
+            nbr   = data['neighbor']
+            self.after(0, lambda n=node, s=steps, t=T, d=delta, a=acc, nh=nbrs_h, nb=nbr:
+                       self._sa_step(n, s, t, d, a, nh, nb))
+
+        elif event == 'sa_frozen':
+            path  = data['path']; node = data['node']
+            steps = data['steps']; T = data['T']
+            self.after(0, lambda p=path, n=node, s=steps, t=T:
+                       self._sa_frozen(p, n, s, t))
+
         return None
 
-    # ── Informed handlers ──────────────────
+    # ── Uninformed handlers ────────────────────
+    def _unf_explore(self, node, exp, frn, algo, depth, limit):
+        self._update_cur_board(node['state'])
+        g = node.get('g', depth)
+        row = [v for r in node['state'] for v in r]
+        msg = f'[#{exp:>4}]  {algo}  depth/cost={g}  frn={frn}  {row}'
+        if limit is not None: msg += f'  limit={limit}'
+        self._unf_panel.update_info(algo, g, exp, frn, '—')
+        self._lbl_exp.config(text=str(exp))
+        self._lbl_frn.config(text=str(frn))
+        self._lbl_stp.config(text=str(exp))
+        self._unf_panel.log_write(msg, 'explore')
+
+    # ── Informed handlers ────────────────────
     def _inf_explore(self, node, exp, frn, limit):
         self._update_cur_board(node['state'])
         algo_name = self._algo_var.get()
@@ -1461,7 +1777,15 @@ class App(tk.Tk):
     def _on_done(self, path, exp, frn, steps, rst):
         self._running = False
         self._lbl_stp.config(text=str(steps))
-        if isinstance(self._active_panel, InformedPanel):
+        if isinstance(self._active_panel, UniformedPanel):
+            self._lbl_exp.config(text=str(exp))
+            self._lbl_frn.config(text=str(frn))
+            algo = self._algo_var.get()
+            self._unf_panel.update_info(algo, '—', exp, frn, steps)
+            self._unf_panel.set_status(f'Tim thay!  {steps} buoc', CLR_OK)
+            self._unf_panel.log_write(
+                f'\n[XONG]  {steps} buoc — {exp} nodes kham pha\n', 'done')
+        elif isinstance(self._active_panel, InformedPanel):
             self._lbl_exp.config(text=str(exp))
             self._lbl_frn.config(text=str(frn))
             self._inf_panel.set_status(f'Tim thay!  {steps} buoc', CLR_OK)
@@ -1481,7 +1805,12 @@ class App(tk.Tk):
 
     def _on_fail(self, exp):
         self._running = False
-        if isinstance(self._active_panel, InformedPanel):
+        if isinstance(self._active_panel, UniformedPanel):
+            self._lbl_exp.config(text=str(exp))
+            self._unf_panel.set_status('Khong tim thay duong di!', CLR_FAIL)
+            self._unf_panel.log_write(
+                f'\n[THAT BAI]  {exp} nodes, khong co duong di.\n', 'fail')
+        elif isinstance(self._active_panel, InformedPanel):
             self._lbl_exp.config(text=str(exp))
             self._inf_panel.set_status('Khong tim thay duong di!', CLR_FAIL)
             self._inf_panel.log_write(
@@ -1594,6 +1923,44 @@ class App(tk.Tk):
         self._loc_panel.set_status(f'That bai sau {iteration} vong lap!', CLR_FAIL)
         self._loc_panel.log_write(
             f'\n[THAT BAI]  Sau {iteration} vong lap, khong tim duoc dich.\n', 'stuck')
+
+    # ── Simulated Annealing handlers ────────────
+    def _sa_step(self, node, steps, T, delta, accepted, nbrs_h, neighbor):
+        st = node.state; h = node.h_cost
+        hi = None
+        if steps > 0:
+            prev = self._cur
+            for i in range(3):
+                for j in range(3):
+                    if prev[i][j] != st[i][j] and st[i][j] != 0: hi = (i, j)
+        self._cur = st
+        self._update_cur_board(st, hi)
+        heur_name = self._heur_var.get()
+        self._loc_panel.update_info(h, self._prev_h,
+                                    min(nbrs_h) if nbrs_h else None,
+                                    steps, heur_name,
+                                    algo_name='Simulated Annealing',
+                                    extra=f'T={T}')
+        self._lbl_h.config(text=str(h))
+        self._lbl_stp.config(text=str(steps))
+        # Log format: buoc | T | delta | accepted/rejected | h
+        acc_str = 'CHAP NHAN' if accepted else 'tu choi'
+        msg = (f'[Buoc {steps:>3}]  T={T:>7.3f}  delta={delta:+d}'
+               f'  {acc_str}  h={h}')
+        self._loc_panel.log_write(msg, 'sa')
+        self._prev_h = h
+
+    def _sa_frozen(self, path, node, steps, T):
+        """SA het nhiet do ma chua tim thay dich."""
+        self._running = False
+        h = node.h_cost
+        self._lbl_stp.config(text=str(steps))
+        self._loc_panel.set_status(f'Dong bang!  h={h}  T={T}  ({steps} buoc)', CLR_FAIL)
+        self._loc_panel.log_write(
+            f'\n[DONG BANG]  Nhiet do = {T}, h(n) = {h}, buoc = {steps}\n'
+            f'    Khong dat duoc goal truoc khi het nhiet!\n', 'stuck')
+        self._show_path(path, stuck=(h > 0))
+        self._animate(path)
 
 
 # ═══════════════════════════════════════════════════════════
