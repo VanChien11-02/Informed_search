@@ -688,6 +688,327 @@ def simulated_annealing_search(start, goal, hfn, cb):
         })
 
 
+def find_min_distance(start, goal):
+    from collections import deque
+    if start == goal:
+        return 0
+    st_t = state_to_tuple(start)
+    g_t = state_to_tuple(goal)
+    q = deque([(st_t, 0)])
+    visited = {st_t}
+    while q:
+        curr, dist = q.popleft()
+        if curr == g_t:
+            return dist
+        curr_lst = [list(row) for row in curr]
+        for act in get_actions(curr_lst):
+            ns = do_move(curr_lst, act)
+            nst = state_to_tuple(ns)
+            if nst not in visited:
+                visited.add(nst)
+                q.append((nst, dist + 1))
+    return -1
+
+
+def backtracking_search(start, goal, hfn, cb):
+    visited = {state_to_tuple(start)}
+    root = {'state': start, 'parent': None, 'action': None, 'g': 0}
+    exp_count = [0]
+
+    def backtrack(cur_node, depth_limit):
+        if not cb('alive', {}):
+            return None
+
+        cur_state = cur_node['state']
+        exp_count[0] += 1
+
+        cb('csp_explore', {
+            'node': cur_node,
+            'exp': exp_count[0],
+            'frn': depth_limit - cur_node['g'],
+            'algo': 'Backtracking Search',
+            'depth': cur_node['g']
+        })
+        time.sleep(0.04)
+
+        if cur_state == goal:
+            return cur_node
+
+        if cur_node['g'] >= depth_limit:
+            return None
+
+        for action in get_actions(cur_state):
+            next_state = do_move(cur_state, action)
+            next_tuple = state_to_tuple(next_state)
+            if next_tuple not in visited:
+                visited.add(next_tuple)
+                child_node = {
+                    'state': next_state,
+                    'parent': cur_node,
+                    'action': action,
+                    'g': cur_node['g'] + 1
+                }
+                res = backtrack(child_node, depth_limit)
+                if res is not None:
+                    return res
+                visited.remove(next_tuple)
+        return None
+
+    sol_node = backtrack(root, depth_limit=20)
+    if sol_node:
+        path_list = trace_path_dict(sol_node)
+        cb('done', {'path': path_list, 'exp': exp_count[0], 'frn': 0, 'steps': len(path_list)-1})
+    else:
+        cb('fail', {'exp': exp_count[0]})
+
+
+def forward_checking_search(start, goal, hfn, cb):
+    visited = {state_to_tuple(start)}
+    root = {'state': start, 'parent': None, 'action': None, 'g': 0}
+    exp_count = [0]
+
+    def forward_check_fn(state):
+        for action in get_actions(state):
+            ns = do_move(state, action)
+            if state_to_tuple(ns) not in visited:
+                return True
+        return False
+
+    def backtrack(cur_node, depth_limit):
+        if not cb('alive', {}):
+            return None
+
+        cur_state = cur_node['state']
+        exp_count[0] += 1
+
+        cb('csp_explore', {
+            'node': cur_node,
+            'exp': exp_count[0],
+            'frn': depth_limit - cur_node['g'],
+            'algo': 'Forward Checking',
+            'depth': cur_node['g']
+        })
+        time.sleep(0.04)
+
+        if cur_state == goal:
+            return cur_node
+
+        if cur_node['g'] >= depth_limit:
+            return None
+
+        for action in get_actions(cur_state):
+            next_state = do_move(cur_state, action)
+            next_tuple = state_to_tuple(next_state)
+            if next_tuple not in visited:
+                if not forward_check_fn(next_state):
+                    continue
+                visited.add(next_tuple)
+                child_node = {
+                    'state': next_state,
+                    'parent': cur_node,
+                    'action': action,
+                    'g': cur_node['g'] + 1
+                }
+                res = backtrack(child_node, depth_limit)
+                if res is not None:
+                    return res
+                visited.remove(next_tuple)
+        return None
+
+    sol_node = backtrack(root, depth_limit=20)
+    if sol_node:
+        path_list = trace_path_dict(sol_node)
+        cb('done', {'path': path_list, 'exp': exp_count[0], 'frn': 0, 'steps': len(path_list)-1})
+    else:
+        cb('fail', {'exp': exp_count[0]})
+
+
+def ac3_search(start, goal, hfn, cb):
+    visited = {state_to_tuple(start)}
+    root = {'state': start, 'parent': None, 'action': None, 'g': 0}
+    exp_count = [0]
+
+    def revise(Xi, Xj, domains):
+        revised = False
+        for x in domains[Xi][:]:
+            supported = False
+            next_states_from_x = [do_move(x, a) for a in get_actions(x)]
+            for y in domains[Xj]:
+                if any(state_to_tuple(y) == state_to_tuple(ns) for ns in next_states_from_x):
+                    supported = True
+                    break
+            if not supported:
+                domains[Xi].remove(x)
+                revised = True
+        return revised
+
+    def AC3(domains):
+        queue = [("X_t+1", "X_t+2")]
+        while queue:
+            Xi, Xj = queue.pop(0)
+            if revise(Xi, Xj, domains):
+                if len(domains[Xi]) == 0:
+                    return False
+        return True
+
+    def backtrack(cur_node, depth_limit):
+        if not cb('alive', {}):
+            return None
+
+        cur_state = cur_node['state']
+        exp_count[0] += 1
+
+        cb('csp_explore', {
+            'node': cur_node,
+            'exp': exp_count[0],
+            'frn': depth_limit - cur_node['g'],
+            'algo': 'AC-3',
+            'depth': cur_node['g']
+        })
+        time.sleep(0.04)
+
+        if cur_state == goal:
+            return cur_node
+
+        if cur_node['g'] >= depth_limit:
+            return None
+
+        for action in get_actions(cur_state):
+            next_state = do_move(cur_state, action)
+            next_tuple = state_to_tuple(next_state)
+            if next_tuple not in visited:
+                if next_state != goal:
+                    domain_t1 = [next_state]
+                    domain_t2 = []
+                    for act2 in get_actions(next_state):
+                        s2 = do_move(next_state, act2)
+                        s2_tuple = state_to_tuple(s2)
+                        if s2_tuple not in visited and s2_tuple != state_to_tuple(cur_state):
+                            domain_t2.append(s2)
+                    domains = {
+                        "X_t+1": domain_t1,
+                        "X_t+2": domain_t2
+                    }
+                    if not AC3(domains):
+                        continue
+
+                visited.add(next_tuple)
+                child_node = {
+                    'state': next_state,
+                    'parent': cur_node,
+                    'action': action,
+                    'g': cur_node['g'] + 1
+                }
+                res = backtrack(child_node, depth_limit)
+                if res is not None:
+                    return res
+                visited.remove(next_tuple)
+        return None
+
+    sol_node = backtrack(root, depth_limit=20)
+    if sol_node:
+        path_list = trace_path_dict(sol_node)
+        cb('done', {'path': path_list, 'exp': exp_count[0], 'frn': 0, 'steps': len(path_list)-1})
+    else:
+        cb('fail', {'exp': exp_count[0]})
+
+
+def min_conflicts_search(start, goal, hfn, cb):
+    T = find_min_distance(start, goal)
+    if T <= 0:
+        cb('done', {'path': [{'state': start, 'action': None}], 'exp': 0, 'frn': 0, 'steps': 0})
+        return
+
+    path = [copy.deepcopy(start)] + [copy.deepcopy(start) for _ in range(T - 1)] + [copy.deepcopy(goal)]
+
+    def is_neighbor(s1, s2):
+        s1_tuple = state_to_tuple(s1)
+        s2_tuple = state_to_tuple(s2)
+        for act in get_actions(s1):
+            ns = do_move(s1, act)
+            if state_to_tuple(ns) == s2_tuple:
+                return True
+        return False
+
+    def count_local_conflicts(var_idx, val, current_path):
+        conflicts = 0
+        if not is_neighbor(current_path[var_idx - 1], val):
+            conflicts += 1
+        if not is_neighbor(val, current_path[var_idx + 1]):
+            conflicts += 1
+        return conflicts
+
+    def get_total_conflicts(current_path):
+        total = 0
+        for i in range(len(current_path) - 1):
+            if not is_neighbor(current_path[i], current_path[i + 1]):
+                total += 1
+        return total
+
+    max_steps = 100
+    for step in range(max_steps):
+        if not cb('alive', {}):
+            return
+
+        total_c = get_total_conflicts(path)
+
+        cb('minconflicts_step', {
+            'step': step,
+            'total_conflicts': total_c,
+            'path': path
+        })
+        time.sleep(0.15)
+
+        if total_c == 0:
+            final_path = [{'state': path[0], 'action': None}]
+            for i in range(T):
+                s_curr = path[i]
+                s_next = path[i+1]
+                found_act = '?'
+                for act in get_actions(s_curr):
+                    ns = do_move(s_curr, act)
+                    if state_to_tuple(ns) == state_to_tuple(s_next):
+                        found_act = act
+                        break
+                final_path.append({'state': s_next, 'action': found_act})
+            cb('done', {'path': final_path, 'exp': step, 'frn': 0, 'steps': T})
+            return
+
+        conflicted_vars = []
+        for t in range(1, T):
+            if count_local_conflicts(t, path[t], path) > 0:
+                conflicted_vars.append(t)
+
+        if not conflicted_vars:
+            break
+
+        var_to_repair = random.choice(conflicted_vars)
+        candidates_set = {state_to_tuple(path[var_to_repair])}
+
+        pred = path[var_to_repair - 1]
+        for act in get_actions(pred):
+            candidates_set.add(state_to_tuple(do_move(pred, act)))
+
+        succ = path[var_to_repair + 1]
+        for act in get_actions(succ):
+            candidates_set.add(state_to_tuple(do_move(succ, act)))
+
+        min_conflict = 999
+        best_candidates = []
+        for cand_tuple in candidates_set:
+            cand = [list(row) for row in cand_tuple]
+            c_count = count_local_conflicts(var_to_repair, cand, path)
+            if c_count < min_conflict:
+                min_conflict = c_count
+                best_candidates = [cand]
+            elif c_count == min_conflict:
+                best_candidates.append(cand)
+
+        path[var_to_repair] = random.choice(best_candidates)
+
+    cb('fail', {'exp': max_steps})
+
+
 # ═══════════════════════════════════════════════════════════
 #  COLORS — Unified Professional Light Theme
 # ═══════════════════════════════════════════════════════════
@@ -715,6 +1036,9 @@ INF_BG    = '#F0EEFF';  INF_BDR   = '#5C35C8';  INF_LOG   = '#FAF8FF'
 
 # Right panel — Local Search (emerald)
 LOC_BG    = '#EEFFF5';  LOC_BDR   = '#1B8A55';  LOC_LOG   = '#F5FFF9'
+
+# Right panel — CSP Search (purple)
+CSP_BG    = '#F3E5F5';  CSP_BDR   = '#7B1FA2';  CSP_LOG   = '#FDF8FF'
 
 # Text
 TXT_W    = '#FFFFFF';   TXT_DARK  = '#1A2440'
@@ -758,6 +1082,12 @@ SEARCH_TYPES = {
         'Local Beam Search',
         'Simulated Annealing',
     ],
+    'CSP Search': [
+        'Backtracking Search',
+        'Forward Checking',
+        'AC-3',
+        'Min-conflicts',
+    ],
 }
 
 # Map algo name -> fn_key
@@ -778,6 +1108,11 @@ ALGO_FN_KEY = {
     'Random Restart HC':  'rrhc',
     'Local Beam Search':  'beamsearch',
     'Simulated Annealing':'sa',
+    # CSP
+    'Backtracking Search': 'backtracking',
+    'Forward Checking':    'forwardchecking',
+    'AC-3':                'ac3',
+    'Min-conflicts':       'minconflicts',
 }
 
 ALGO_FN = {
@@ -794,18 +1129,106 @@ ALGO_FN = {
     'rrhc':         random_restart_hc_search,
     'beamsearch':   local_beam_search_fn,
     'sa':           simulated_annealing_search,
+    'backtracking': backtracking_search,
+    'forwardchecking': forward_checking_search,
+    'ac3':          ac3_search,
+    'minconflicts': min_conflicts_search,
 }
 
 # Nhom thuat toan theo loai
 UNINFORMED_KEYS = {'bfs', 'dfs', 'ids', 'ucs'}
 INFORMED_KEYS   = {'greedy', 'astar', 'idastar'}
 LOCAL_KEYS      = {'simplehc', 'steepesthc', 'stochastichc', 'rrhc', 'beamsearch', 'sa'}
+CSP_KEYS        = {'backtracking', 'forwardchecking', 'ac3', 'minconflicts'}
 
 # Pseudocode cho tung thuat toan local search
 DEFAULT_START = [[1,2,3],
               [4,0,6],
               [7,5,8]]
 DEFAULT_GOAL  = [[1, 2, 3], [4, 5, 6], [7, 8, 0]]
+
+class CspPanel(tk.Frame):
+    def __init__(self, parent, F):
+        super().__init__(parent, bg=CSP_BG,
+                         highlightbackground=CSP_BDR, highlightthickness=2)
+        self._F = F
+        self._build()
+
+    def _build(self):
+        tk.Frame(self, bg=CSP_BDR, height=3).pack(fill=tk.X)
+        inn = tk.Frame(self, bg=CSP_BG)
+        inn.pack(fill=tk.BOTH, expand=True, padx=12, pady=8)
+
+        tk.Label(inn, text='CSP Search — Thong Tin',
+                 bg=CSP_BG, fg=CSP_BDR, font=self._F['hdr']).pack(anchor='w')
+
+        self._cv = {}
+        rows = [
+            ('Thuat toan', '',                  CLR_ALGO),
+            ('Do sau / Buoc', 'do sau hien tai', '#E65100'),
+            ('Nodes duyet', 'so node da xet',    CLR_EXP),
+            ('Trang thai / Xung dot', 'frontier / conflicts', CLR_FRN),
+            ('Steps',       'so buoc ket qua', CLR_STEPS),
+        ]
+        for key, desc, clr in rows:
+            rf = tk.Frame(inn, bg=CSP_BG); rf.pack(fill=tk.X, pady=2)
+            tk.Label(rf, text=f'{key}:', bg=CSP_BG, fg=TXT_MID,
+                     font=self._F['stat'], width=18, anchor='w').pack(side=tk.LEFT)
+            tk.Label(rf, text=desc, bg=CSP_BG, fg=TXT_DIM,
+                     font=self._F['stat']).pack(side=tk.LEFT)
+            v = tk.Label(rf, text='—', bg=CSP_BG, fg=clr, font=self._F['bdge'])
+            v.pack(side=tk.RIGHT)
+            self._cv[key] = v
+
+        self._status = tk.Label(inn, text='San sang', bg=CSP_BG,
+                                fg=CLR_OK, font=self._F['hdr'])
+        self._status.pack(anchor='w', pady=(6, 0))
+
+        tk.Frame(inn, bg=CSP_BDR, height=1).pack(fill=tk.X, pady=(10, 4))
+        tk.Label(inn, text='Nhat Ky CSP', bg=CSP_BG, fg=CSP_BDR,
+                 font=self._F['hdr']).pack(anchor='w', pady=(0, 4))
+
+        lf = tk.Frame(inn, bg=CSP_BG); lf.pack(fill=tk.BOTH, expand=True)
+        self._log = tk.Text(lf, bg=CSP_LOG, fg=TXT_DARK, font=self._F['mono'],
+                            relief='flat', wrap=tk.NONE, state=tk.DISABLED,
+                            highlightthickness=1, highlightbackground=CSP_BDR)
+        vsb = tk.Scrollbar(lf, orient=tk.VERTICAL, command=self._log.yview)
+        hsb = tk.Scrollbar(lf, orient=tk.HORIZONTAL, command=self._log.xview)
+        self._log.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        hsb.pack(side=tk.BOTTOM, fill=tk.X)
+        self._log.pack(fill=tk.BOTH, expand=True)
+        self._log.tag_config('explore', foreground='#7B1FA2')
+        self._log.tag_config('done',    foreground='#2E7D32')
+        self._log.tag_config('fail',    foreground='#C62828')
+        self._log.tag_config('info',    foreground='#E65100')
+
+    def set_status(self, text, clr=None):
+        self._status.config(text=text, fg=clr or CLR_OK)
+
+    def log_write(self, msg, tag=''):
+        self._log.config(state=tk.NORMAL)
+        self._log.insert(tk.END, msg + '\n', tag)
+        self._log.see(tk.END)
+        self._log.config(state=tk.DISABLED)
+
+    def log_clear(self):
+        self._log.config(state=tk.NORMAL)
+        self._log.delete('1.0', tk.END)
+        self._log.config(state=tk.DISABLED)
+
+    def update_info(self, algo, depth_or_cost, exp, frn, steps):
+        self._cv['Thuat toan'].config(text=algo)
+        self._cv['Do sau / Buoc'].config(text=str(depth_or_cost))
+        self._cv['Nodes duyet'].config(text=str(exp))
+        self._cv['Trang thai / Xung dot'].config(text=str(frn))
+        self._cv['Steps'].config(text=str(steps))
+
+    def reset(self, fn_key='backtracking'):
+        for k in self._cv: self._cv[k].config(text='—')
+        self._status.config(text='San sang', fg=CLR_OK)
+        self.log_clear()
+
 
 class UniformedPanel(tk.Frame):
     def __init__(self, parent, F):
@@ -1174,12 +1597,15 @@ class App(tk.Tk):
         self._inf_panel = InformedPanel(self._rc, self._F)
         self._loc_panel = LocalPanel(self._rc, self._F)
         self._unf_panel = UniformedPanel(self._rc, self._F)
+        self._csp_panel = CspPanel(self._rc, self._F)
 
         self._inf_panel.grid(row=0, column=0, sticky='nsew')
         self._loc_panel.grid(row=0, column=0, sticky='nsew')
         self._unf_panel.grid(row=0, column=0, sticky='nsew')
+        self._csp_panel.grid(row=0, column=0, sticky='nsew')
         self._loc_panel.grid_remove()   # hidden by default
         self._unf_panel.grid_remove()   # hidden by default
+        self._csp_panel.grid_remove()   # hidden by default
         self._active_panel = self._inf_panel
 
     def _build_header(self):
@@ -1458,7 +1884,7 @@ class App(tk.Tk):
         self._swap_panel(stype)
         self._update_stats_visibility(stype)
         # An / hien CB3 Heuristic
-        if stype == 'Uninformed Search':
+        if stype == 'Uninformed Search' or stype == 'CSP Search':
             self._cb3_lbl.pack_forget()
             self._cb3.pack_forget()
             self._cb3_sep.pack_forget()
@@ -1517,6 +1943,8 @@ class App(tk.Tk):
             self._unf_panel.reset(fn_key)
         elif stype == 'Informed Search':
             self._inf_panel.reset(fn_key, heur_key)
+        elif stype == 'CSP Search':
+            self._csp_panel.reset(fn_key)
         else:
             self._loc_panel.reset()
             self._loc_panel._cv['Heuristic'].config(text=self._heur_var.get())
@@ -1528,12 +1956,16 @@ class App(tk.Tk):
         self._unf_panel.grid_remove()
         self._inf_panel.grid_remove()
         self._loc_panel.grid_remove()
+        self._csp_panel.grid_remove()
         if stype == 'Uninformed Search':
             self._unf_panel.grid()
             self._active_panel = self._unf_panel
         elif stype == 'Informed Search':
             self._inf_panel.grid()
             self._active_panel = self._inf_panel
+        elif stype == 'CSP Search':
+            self._csp_panel.grid()
+            self._active_panel = self._csp_panel
         else:
             self._loc_panel.grid()
             self._active_panel = self._loc_panel
@@ -1579,6 +2011,8 @@ class App(tk.Tk):
             self._unf_panel.reset(fn_key)
         elif isinstance(self._active_panel, InformedPanel):
             self._active_panel.reset(fn_key, heur_key)
+        elif isinstance(self._active_panel, CspPanel):
+            self._csp_panel.reset(fn_key)
         else:
             self._active_panel.reset()
 
@@ -1615,6 +2049,11 @@ class App(tk.Tk):
         if fn_key in UNINFORMED_KEYS:
             self._active_panel.log_write(
                 f'[BAT DAU]  {algo_name}  (khong dung heuristic)', 'info')
+            self._lbl_exp.config(text='0')
+            self._lbl_frn.config(text='0')
+        elif fn_key in CSP_KEYS:
+            self._active_panel.log_write(
+                f'[BAT DAU]  {algo_name}  (CSP formulation)', 'info')
             self._lbl_exp.config(text='0')
             self._lbl_frn.config(text='0')
         elif isinstance(self._active_panel, InformedPanel):
@@ -1744,6 +2183,21 @@ class App(tk.Tk):
             self.after(0, lambda p=path, n=node, s=steps, t=T:
                        self._sa_frozen(p, n, s, t))
 
+        # ── CSP Search events ──────────────────────
+        elif event == 'csp_explore':
+            node  = data['node']; exp = data['exp']; frn = data['frn']
+            algo  = data.get('algo', '?')
+            depth = data.get('depth', '—')
+            self.after(0, lambda n=node, e=exp, f=frn, a=algo, d=depth:
+                       self._csp_explore(n, e, f, a, d))
+            time.sleep(0.04)
+
+        elif event == 'minconflicts_step':
+            step  = data['step']; tc = data['total_conflicts']; path = data['path']
+            self.after(0, lambda s=step, t=tc, p=path:
+                       self._minconflicts_step(s, t, p))
+            time.sleep(0.15)
+
         return None
 
     # ── Uninformed handlers ────────────────────
@@ -1790,6 +2244,14 @@ class App(tk.Tk):
             self._lbl_frn.config(text=str(frn))
             self._inf_panel.set_status(f'Tim thay!  {steps} buoc', CLR_OK)
             self._inf_panel.log_write(f'\n[XONG]  {steps} buoc — {exp} nodes\n', 'done')
+        elif isinstance(self._active_panel, CspPanel):
+            self._lbl_exp.config(text=str(exp))
+            self._lbl_frn.config(text=str(frn))
+            algo = self._algo_var.get()
+            self._csp_panel.update_info(algo, '—', exp, frn, steps)
+            self._csp_panel.set_status(f'Tim thay!  {steps} buoc', CLR_OK)
+            self._csp_panel.log_write(
+                f'\n[XONG]  {steps} buoc — {exp} nodes/steps\n', 'done')
         else:
             rst_str = f'{rst}' if rst is not None else '—'
             self._lbl_rst.config(text=rst_str)
@@ -1815,6 +2277,11 @@ class App(tk.Tk):
             self._inf_panel.set_status('Khong tim thay duong di!', CLR_FAIL)
             self._inf_panel.log_write(
                 f'\n[THAT BAI]  {exp} nodes, khong co duong di.\n', 'fail')
+        elif isinstance(self._active_panel, CspPanel):
+            self._lbl_exp.config(text=str(exp))
+            self._csp_panel.set_status('Khong tim thay duong di!', CLR_FAIL)
+            self._csp_panel.log_write(
+                f'\n[THAT BAI]  {exp} nodes/steps, khong co duong di.\n', 'fail')
         else:
             self._loc_panel.set_status('Khong tim thay duong di!', CLR_FAIL)
             self._loc_panel.log_write('\n[THAT BAI]  Khong co duong di.\n', 'stuck')
@@ -1961,6 +2428,27 @@ class App(tk.Tk):
             f'    Khong dat duoc goal truoc khi het nhiet!\n', 'stuck')
         self._show_path(path, stuck=(h > 0))
         self._animate(path)
+
+    # ── CSP handlers ───────────────────────────
+    def _csp_explore(self, node, exp, frn, algo, depth):
+        self._update_cur_board(node['state'])
+        row = [v for r in node['state'] for v in r]
+        msg = f'[#{exp:>4}]  {algo}  depth={depth}  budget={frn}  {row}'
+        self._csp_panel.update_info(algo, depth, exp, frn, '—')
+        self._lbl_exp.config(text=str(exp))
+        self._lbl_frn.config(text=str(frn))
+        self._lbl_stp.config(text=str(exp))
+        self._csp_panel.log_write(msg, 'explore')
+
+    def _minconflicts_step(self, step, total_conflicts, path):
+        mid = len(path) // 2
+        self._update_cur_board(path[mid])
+        msg = f'[Vong {step:>3}]  Xung dot = {total_conflicts}'
+        self._csp_panel.update_info('Min-conflicts', f'Iter {step}', step, total_conflicts, '—')
+        self._lbl_exp.config(text=str(step))
+        self._lbl_frn.config(text=str(total_conflicts))
+        self._lbl_stp.config(text=str(step))
+        self._csp_panel.log_write(msg, 'explore')
 
 
 # ═══════════════════════════════════════════════════════════
