@@ -1,6 +1,7 @@
 import copy, heapq, math, tkinter as tk
 from tkinter import ttk, messagebox
 import threading, time, random
+from collections import deque
 
 def random_start_state():
     nums  = list(range(9))
@@ -1009,6 +1010,193 @@ def min_conflicts_search(start, goal, hfn, cb):
     cb('fail', {'exp': max_steps})
 
 
+# ── Complex Environment Search Constants ──
+ACTIONS = ['U', 'D', 'L', 'R']
+GOAL_SINGLE = ((1, 2, 3), (8, 0, 4), (7, 6, 5))
+GOAL_A = ((1, 2, 3), (8, 0, 4), (7, 6, 5))
+GOAL_B = ((1, 2, 3), (4, 5, 6), (7, 8, 0))
+GOAL_C = ((8, 7, 6), (5, 4, 3), (2, 1, 0))
+GOAL_MULTI = frozenset([GOAL_A, GOAL_B, GOAL_C])
+MASK_START = ((1, 2, -1), (-1, -1, -1), (-1, -1, -1))
+MASK_GOAL = ((1, 2, 3), (-1, -1, -1), (7, -1, -1))
+ANDOR_START = ((1, 2, 3), (4, 0, 5), (7, 8, 6))
+ANDOR_GOAL  = ((1, 2, 3), (4, 5, 6), (7, 8, 0))
+
+
+# ── Complex Environment Helpers ──
+def move_blank(state, action):
+    x = y = -1
+    for i in range(3):
+        for j in range(3):
+            if state[i][j] == 0:
+                x, y = i, j
+    nx, ny = x, y
+    if action == 'U':   nx -= 1
+    elif action == 'D': nx += 1
+    elif action == 'L': ny -= 1
+    elif action == 'R': ny += 1
+    if 0 <= nx < 3 and 0 <= ny < 3:
+        lst = [list(r) for r in state]
+        lst[x][y], lst[nx][ny] = lst[nx][ny], lst[x][y]
+        return tuple(tuple(r) for r in lst)
+    return state
+
+
+def random_puzzle_state():
+    nums = list(range(9))
+    random.shuffle(nums)
+    return tuple(tuple(nums[i * 3 + j] for j in range(3)) for i in range(3))
+
+
+def generate_random_belief(n=2, exclude=None):
+    exclude = exclude or set()
+    states = []
+    while len(states) < n:
+        s = random_puzzle_state()
+        if s not in exclude and s not in states:
+            states.append(s)
+    return frozenset(states)
+
+
+def generate_from_mask(mask, n=2):
+    fixed = set()
+    hidden = []
+    for i in range(3):
+        for j in range(3):
+            if mask[i][j] != -1:
+                fixed.add(mask[i][j])
+            else:
+                hidden.append((i, j))
+    remaining = [x for x in range(9) if x not in fixed]
+    states = set()
+    while len(states) < n:
+        r = list(remaining)
+        random.shuffle(r)
+        tmp = [list(row) for row in mask]
+        for k, (ri, ci) in enumerate(hidden):
+            tmp[ri][ci] = r[k]
+        s = tuple(tuple(row) for row in tmp)
+        states.add(s)
+    return frozenset(states)
+
+
+def generate_goal_from_mask(mask, n=3):
+    return generate_from_mask(mask, n)
+
+
+# ── Complex Environment Search Algorithms ──
+def belief_bfs_single_goal(start_belief, goal, cb):
+    frontier  = deque([(start_belief, [])])
+    explored  = {start_belief}
+    nodes_exp = [0]
+    while frontier:
+        if not cb('alive', {}): return
+        cur, path = frontier.popleft()
+        nodes_exp[0] += 1
+        cb('belief_step', {'belief': cur, 'path': path,
+                           'action': path[-1] if path else None,
+                           'step': len(path), 'exp': nodes_exp[0], 'frn': len(frontier)})
+        time.sleep(0.12)
+        if all(s == goal for s in cur):
+            cb('done', {'path': path, 'belief': cur,
+                        'exp': nodes_exp[0], 'steps': len(path)}); return
+        for act in ACTIONS:
+            nxt = frozenset(move_blank(s, act) for s in cur)
+            if nxt not in explored:
+                explored.add(nxt); frontier.append((nxt, path + [act]))
+    cb('fail', {'exp': nodes_exp[0]})
+
+
+def belief_bfs_multi_goal(start_belief, goal_belief, cb):
+    frontier  = deque([(start_belief, [])])
+    explored  = {start_belief}
+    nodes_exp = [0]
+    while frontier:
+        if not cb('alive', {}): return
+        cur, path = frontier.popleft()
+        nodes_exp[0] += 1
+        cb('belief_step', {'belief': cur, 'path': path,
+                           'action': path[-1] if path else None,
+                           'step': len(path), 'exp': nodes_exp[0], 'frn': len(frontier)})
+        time.sleep(0.12)
+        if cur.issubset(goal_belief):
+            cb('done', {'path': path, 'belief': cur,
+                        'exp': nodes_exp[0], 'steps': len(path)}); return
+        for act in ACTIONS:
+            nxt = frozenset(move_blank(s, act) for s in cur)
+            if nxt not in explored:
+                explored.add(nxt); frontier.append((nxt, path + [act]))
+    cb('fail', {'exp': nodes_exp[0]})
+
+
+def belief_bfs_goal_mask(start_belief, goal_belief, cb):
+    belief_bfs_multi_goal(start_belief, goal_belief, cb)
+
+
+def get_nondeterministic_results(state, action):
+    slip = {'U': ['L', 'R'], 'D': ['L', 'R'], 'L': ['U', 'D'], 'R': ['U', 'D']}
+    acts = [action] + slip[action]
+    return frozenset(move_blank(state, a) for a in acts)
+
+
+def _or_search(state, goal, path_set, nodes, cb, depth=0):
+    if not cb('alive', {}): return 'STOP'
+    if state == goal: return 'GOAL_REACHED'
+    if state in path_set: return None
+    if depth > 30: return None
+
+    nodes[0] += 1
+    cb('andor_node', {'state': state, 'depth': depth, 'nodes': nodes[0], 'kind': 'OR'})
+    time.sleep(0.04)
+
+    for action in ACTIONS:
+        possible = get_nondeterministic_results(state, action)
+        plan = _and_search(possible, goal, path_set | {state}, nodes, cb, depth + 1)
+        if plan == 'STOP': return 'STOP'
+        if plan is not None:
+            return {action: plan}
+    return None
+
+
+def _and_search(states, goal, path_set, nodes, cb, depth):
+    plan = {}
+    for state in states:
+        sub = _or_search(state, goal, path_set, nodes, cb, depth)
+        if sub == 'STOP': return 'STOP'
+        if sub is None: return None
+        plan[state] = sub
+    return plan
+
+
+def and_or_search(start_state, goal_state, cb):
+    nodes = [0]
+    cb('belief_step', {'belief': frozenset([start_state]), 'path': [],
+                       'action': None, 'step': 0, 'exp': 0, 'frn': 0})
+    plan = _or_search(start_state, goal_state, set(), nodes, cb, 0)
+    if plan == 'STOP': return
+    if plan is not None:
+        cb('andor_done', {'plan': plan, 'exp': nodes[0]})
+    else:
+        cb('fail', {'exp': nodes[0]})
+
+
+def format_plan_lines(plan, indent=0):
+    lines = []
+    if plan == 'GOAL_REACHED':
+        lines.append('  ' * indent + '-> DAT DICH!')
+        return lines
+    if plan is None:
+        lines.append('  ' * indent + '-> BE TAC')
+        return lines
+    for action, branches in plan.items():
+        lines.append('  ' * indent + f'[Bot bam: {action}]  ({len(branches)} kich ban)')
+        for st, sub in branches.items():
+            row = [v for r in st for v in r]
+            lines.append('  ' * (indent + 1) + f'Kich ban {row}:')
+            lines.extend(format_plan_lines(sub, indent + 2))
+    return lines
+
+
 # ═══════════════════════════════════════════════════════════
 #  COLORS — Unified Professional Light Theme
 # ═══════════════════════════════════════════════════════════
@@ -1021,7 +1209,13 @@ CB_FG    = '#60C8FF'
 # Left-top (boards input)
 SKY_BG    = '#E8F4FF';  SKY_BDR   = '#2196F3'
 SKY_TILE  = '#90CAF9';  SKY_TXT   = '#0D3B66';  SKY_EMPTY = '#F5F7FA'
+GOAL_BG   = '#E8F5E9';  GOAL_BDR  = '#2E7D32'
 GOAL_TILE = '#A5D6A7';  GOAL_TXT  = '#1B5E20';  GOAL_EM   = '#E8F5E9'
+GOAL_T    = GOAL_TILE
+
+INIT_BG   = '#E3F2FD';  INIT_BDR  = '#1565C0'
+INIT_TILE = '#90CAF9';  INIT_TXT  = '#0D3B66';  INIT_EM   = '#E3F2FD'
+INIT_T    = INIT_TILE
 
 # Left-bottom (animated board + path)
 MNT_BG    = '#E8FFF6';  MNT_BDR   = '#00897B'
@@ -1039,6 +1233,11 @@ LOC_BG    = '#EEFFF5';  LOC_BDR   = '#1B8A55';  LOC_LOG   = '#F5FFF9'
 
 # Right panel — CSP Search (purple)
 CSP_BG    = '#F3E5F5';  CSP_BDR   = '#7B1FA2';  CSP_LOG   = '#FDF8FF'
+
+# Right panel — Complex Search (teal)
+BLF_BG    = '#EEF6FF';  BLF_BDR   = '#00695C';  BLF_LOG   = '#F5FEFF'
+ANDOR_BG  = '#FFF8E1';  ANDOR_BDR = '#E65100'
+CLR_BSIZ  = '#AD1457'
 
 # Text
 TXT_W    = '#FFFFFF';   TXT_DARK  = '#1A2440'
@@ -1088,6 +1287,13 @@ SEARCH_TYPES = {
         'AC-3',
         'Min-conflicts',
     ],
+    'Complex Environment Search': [
+        'Belief-State BFS',
+        'No-Obs Multi-Goal BFS',
+        'Partial-Obs Start BFS',
+        'Partial-Obs Goal BFS',
+        'AND-OR Graph Search',
+    ],
 }
 
 # Map algo name -> fn_key
@@ -1113,6 +1319,12 @@ ALGO_FN_KEY = {
     'Forward Checking':    'forwardchecking',
     'AC-3':                'ac3',
     'Min-conflicts':       'minconflicts',
+    # Complex Environment Search
+    'Belief-State BFS':       'belief_bfs',
+    'No-Obs Multi-Goal BFS':  'multi_goal_bfs',
+    'Partial-Obs Start BFS':  'part_obs_start_bfs',
+    'Partial-Obs Goal BFS':   'part_obs_goal_bfs',
+    'AND-OR Graph Search':    'and_or_search',
 }
 
 ALGO_FN = {
@@ -1133,6 +1345,11 @@ ALGO_FN = {
     'forwardchecking': forward_checking_search,
     'ac3':          ac3_search,
     'minconflicts': min_conflicts_search,
+    'belief_bfs':          belief_bfs_single_goal,
+    'multi_goal_bfs':      belief_bfs_multi_goal,
+    'part_obs_start_bfs':  belief_bfs_single_goal,
+    'part_obs_goal_bfs':   belief_bfs_goal_mask,
+    'and_or_search':       and_or_search,
 }
 
 # Nhom thuat toan theo loai
@@ -1140,12 +1357,96 @@ UNINFORMED_KEYS = {'bfs', 'dfs', 'ids', 'ucs'}
 INFORMED_KEYS   = {'greedy', 'astar', 'idastar'}
 LOCAL_KEYS      = {'simplehc', 'steepesthc', 'stochastichc', 'rrhc', 'beamsearch', 'sa'}
 CSP_KEYS        = {'backtracking', 'forwardchecking', 'ac3', 'minconflicts'}
+COMPLEX_KEYS    = {'belief_bfs', 'multi_goal_bfs', 'part_obs_start_bfs', 'part_obs_goal_bfs', 'and_or_search'}
 
 # Pseudocode cho tung thuat toan local search
 DEFAULT_START = [[1,2,3],
               [4,0,6],
               [7,5,8]]
 DEFAULT_GOAL  = [[1, 2, 3], [4, 5, 6], [7, 8, 0]]
+
+class ComplexPanel(tk.Frame):
+    def __init__(self, parent, F):
+        super().__init__(parent, bg=BLF_BG,
+                         highlightbackground=BLF_BDR, highlightthickness=2)
+        self._F = F
+        self._build()
+
+    def _build(self):
+        tk.Frame(self, bg=BLF_BDR, height=4).pack(fill=tk.X)
+        inn = tk.Frame(self, bg=BLF_BG)
+        inn.pack(fill=tk.BOTH, expand=True, padx=14, pady=10)
+        tk.Label(inn, text='Complex Environment — Thong Tin',
+                 bg=BLF_BG, fg=BLF_BDR, font=self._F['hdr']).pack(anchor='w', pady=(0, 6))
+
+        self._cv = {}
+        rows = [
+            ('Thuat toan',  '—',                       CLR_ALGO),
+            ('Belief Size', 'so ma tran hien tai',     CLR_BSIZ),
+            ('Buoc',        'so hanh dong da thuc hien', CLR_STEPS),
+            ('Hanh dong',   'lenh vua thuc hien',      '#E65100'),
+            ('Nodes KP',    'nodes da kham pha',       CLR_EXP),
+            ('Frontier',    'hang doi hien tai',       CLR_FRN),
+        ]
+        for key, desc, clr in rows:
+            rf = tk.Frame(inn, bg=BLF_BG); rf.pack(fill=tk.X, pady=2)
+            tk.Label(rf, text=f'{key}:', bg=BLF_BG, fg=TXT_MID,
+                     font=self._F['stat'], width=13, anchor='w').pack(side=tk.LEFT)
+            tk.Label(rf, text=desc, bg=BLF_BG, fg=TXT_DIM,
+                     font=self._F['stat']).pack(side=tk.LEFT)
+            v = tk.Label(rf, text='—', bg=BLF_BG, fg=clr, font=self._F['bdge'])
+            v.pack(side=tk.RIGHT)
+            self._cv[key] = v
+
+        self._status = tk.Label(inn, text='San sang', bg=BLF_BG,
+                                fg=CLR_OK, font=self._F['hdr'])
+        self._status.pack(anchor='w', pady=(8, 0))
+
+        tk.Frame(inn, bg=BLF_BDR, height=1).pack(fill=tk.X, pady=(10, 4))
+        tk.Label(inn, text='Nhat Ky / Ke Hoach', bg=BLF_BG, fg=BLF_BDR,
+                 font=self._F['hdr']).pack(anchor='w', pady=(0, 4))
+        lf = tk.Frame(inn, bg=BLF_BG); lf.pack(fill=tk.BOTH, expand=True)
+        self._log = tk.Text(lf, bg=BLF_LOG, fg=TXT_DARK, font=self._F['mono'],
+                            relief='flat', wrap=tk.NONE, state=tk.DISABLED,
+                            highlightthickness=1, highlightbackground=BLF_BDR)
+        vsb = tk.Scrollbar(lf, orient=tk.VERTICAL,   command=self._log.yview)
+        hsb = tk.Scrollbar(lf, orient=tk.HORIZONTAL, command=self._log.xview)
+        self._log.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        hsb.pack(side=tk.BOTTOM, fill=tk.X)
+        self._log.pack(fill=tk.BOTH, expand=True)
+        for t, c in [('start','#1565C0'),('step','#006064'),('done','#2E7D32'),
+                     ('fail','#C62828'),('info','#AD1457'),('andor','#E65100'),
+                     ('plan','#4A148C')]:
+            self._log.tag_config(t, foreground=c)
+
+    def set_status(self, text, clr=None):
+        self._status.config(text=text, fg=clr or CLR_OK)
+
+    def log_write(self, msg, tag=''):
+        self._log.config(state=tk.NORMAL)
+        self._log.insert(tk.END, msg + '\n', tag)
+        self._log.see(tk.END)
+        self._log.config(state=tk.DISABLED)
+
+    def log_clear(self):
+        self._log.config(state=tk.NORMAL)
+        self._log.delete('1.0', tk.END)
+        self._log.config(state=tk.DISABLED)
+
+    def update_info(self, belief_size, step, action, exp, frn):
+        self._cv['Belief Size'].config(text=str(belief_size))
+        self._cv['Buoc'].config(text=str(step))
+        self._cv['Hanh dong'].config(text=action if action else 'Khoi dau')
+        self._cv['Nodes KP'].config(text=str(exp))
+        self._cv['Frontier'].config(text=str(frn))
+
+    def reset(self, algo_name='—'):
+        for k, v in self._cv.items():
+            v.config(text='—' if k != 'Thuat toan' else algo_name)
+        self._status.config(text='San sang', fg=CLR_OK)
+        self.log_clear()
+
 
 class CspPanel(tk.Frame):
     def __init__(self, parent, F):
@@ -1588,6 +1889,17 @@ class App(tk.Tk):
         mnt.grid(row=1, column=0, sticky='nsew', padx=(0, 6))
         self._build_mint(mnt)
 
+        # Complex Left Panels (hidden by default)
+        self._sky_complex = tk.Frame(sky, bg=ROOT_BG)
+        self._sky_complex.pack(fill=tk.BOTH, expand=True)
+        self._sky_complex.pack_forget()
+        self._build_complex_sky(self._sky_complex)
+
+        self._mnt_complex = tk.Frame(mnt, bg=MNT_BG)
+        self._mnt_complex.pack(fill=tk.BOTH, expand=True)
+        self._mnt_complex.pack_forget()
+        self._build_complex_mint(self._mnt_complex)
+
         # Right — swappable panel container
         self._rc = tk.Frame(body, bg=ROOT_BG)
         self._rc.grid(row=0, column=1, rowspan=2, sticky='nsew')
@@ -1598,14 +1910,17 @@ class App(tk.Tk):
         self._loc_panel = LocalPanel(self._rc, self._F)
         self._unf_panel = UniformedPanel(self._rc, self._F)
         self._csp_panel = CspPanel(self._rc, self._F)
+        self._complex_panel = ComplexPanel(self._rc, self._F)
 
         self._inf_panel.grid(row=0, column=0, sticky='nsew')
         self._loc_panel.grid(row=0, column=0, sticky='nsew')
         self._unf_panel.grid(row=0, column=0, sticky='nsew')
         self._csp_panel.grid(row=0, column=0, sticky='nsew')
+        self._complex_panel.grid(row=0, column=0, sticky='nsew')
         self._loc_panel.grid_remove()   # hidden by default
         self._unf_panel.grid_remove()   # hidden by default
         self._csp_panel.grid_remove()   # hidden by default
+        self._complex_panel.grid_remove() # hidden by default
         self._active_panel = self._inf_panel
 
     def _build_header(self):
@@ -1635,7 +1950,7 @@ class App(tk.Tk):
         self._cb2 = ttk.Combobox(hdr, textvariable=self._algo_var,
                                   state='readonly', font=self.F_BODY, width=18)
         self._cb2.pack(side=tk.LEFT, pady=10)
-        self._cb2.bind('<<ComboboxSelected>>', lambda e: self._on_algo_change())
+        self._cb2.bind('<<ComboboxSelected>>', lambda e: self._on_algo_change_routing())
 
         self._vsep(hdr)
 
@@ -1671,10 +1986,18 @@ class App(tk.Tk):
         self._lbl_h   = self._badge(self._loc_sf, 'h(n)', '—', CLR_H_CUR)
         self._lbl_rst = self._badge(self._loc_sf, 'Restart', '—', CLR_WARN)
 
+        # Complex-only stats frame (hidden by default)
+        self._complex_sf = tk.Frame(sf, bg=HDR_BG)
+        self._lbl_bsiz = self._badge(self._complex_sf, 'Belief Size', '—', CLR_BSIZ)
+        self._lbl_exp_complex = self._badge(self._complex_sf, 'Nodes KP', '0', CLR_EXP)
+
     #  LEFT — SKY BLUE (boards)
     def _build_sky(self, parent):
-        tk.Frame(parent, bg=SKY_BDR, height=3).pack(fill=tk.X)
-        inner = tk.Frame(parent, bg=SKY_BG)
+        self._sky_std = tk.Frame(parent, bg=SKY_BG)
+        self._sky_std.pack(fill=tk.BOTH, expand=True)
+
+        tk.Frame(self._sky_std, bg=SKY_BDR, height=3).pack(fill=tk.X)
+        inner = tk.Frame(self._sky_std, bg=SKY_BG)
         inner.pack(fill=tk.BOTH, expand=True, padx=10, pady=6)
         inner.columnconfigure(0, weight=1)
         inner.columnconfigure(1, weight=1)
@@ -1721,8 +2044,11 @@ class App(tk.Tk):
 
     #  LEFT — MINT (animated board + path)
     def _build_mint(self, parent):
-        tk.Frame(parent, bg=MNT_BDR, height=3).pack(fill=tk.X)
-        inner = tk.Frame(parent, bg=MNT_BG)
+        self._mnt_std = tk.Frame(parent, bg=MNT_BG)
+        self._mnt_std.pack(fill=tk.BOTH, expand=True)
+
+        tk.Frame(self._mnt_std, bg=MNT_BDR, height=3).pack(fill=tk.X)
+        inner = tk.Frame(self._mnt_std, bg=MNT_BG)
         inner.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
 
         left = tk.Frame(inner, bg=MNT_BG)
@@ -1884,7 +2210,7 @@ class App(tk.Tk):
         self._swap_panel(stype)
         self._update_stats_visibility(stype)
         # An / hien CB3 Heuristic
-        if stype == 'Uninformed Search' or stype == 'CSP Search':
+        if stype in ('Uninformed Search', 'CSP Search', 'Complex Environment Search'):
             self._cb3_lbl.pack_forget()
             self._cb3.pack_forget()
             self._cb3_sep.pack_forget()
@@ -1892,7 +2218,19 @@ class App(tk.Tk):
             self._cb3_lbl.pack(side=tk.LEFT, padx=(4, 2))
             self._cb3.pack(side=tk.LEFT, pady=10)
             self._cb3_sep.pack(side=tk.LEFT, padx=8, pady=10)
-        self._on_algo_change()
+
+        if stype == 'Complex Environment Search':
+            self._sky_std.pack_forget()
+            self._mnt_std.pack_forget()
+            self._sky_complex.pack(fill=tk.BOTH, expand=True)
+            self._mnt_complex.pack(fill=tk.BOTH, expand=True)
+            self._on_complex_algo_change()
+        else:
+            self._sky_complex.pack_forget()
+            self._mnt_complex.pack_forget()
+            self._sky_std.pack(fill=tk.BOTH, expand=True)
+            self._mnt_std.pack(fill=tk.BOTH, expand=True)
+            self._on_algo_change()
 
     def _on_algo_change(self):
         algo_name = self._algo_var.get()
@@ -1957,6 +2295,7 @@ class App(tk.Tk):
         self._inf_panel.grid_remove()
         self._loc_panel.grid_remove()
         self._csp_panel.grid_remove()
+        self._complex_panel.grid_remove()
         if stype == 'Uninformed Search':
             self._unf_panel.grid()
             self._active_panel = self._unf_panel
@@ -1966,16 +2305,22 @@ class App(tk.Tk):
         elif stype == 'CSP Search':
             self._csp_panel.grid()
             self._active_panel = self._csp_panel
+        elif stype == 'Complex Environment Search':
+            self._complex_panel.grid()
+            self._active_panel = self._complex_panel
         else:
             self._loc_panel.grid()
             self._active_panel = self._loc_panel
 
     def _update_stats_visibility(self, stype):
+        self._loc_sf.pack_forget()
+        self._inf_sf.pack_forget()
+        self._complex_sf.pack_forget()
         if stype == 'Local Search':
-            self._inf_sf.pack_forget()
             self._loc_sf.pack(side=tk.RIGHT)
-        else:  # Uninformed Search + Informed Search deu can Explored/Frontier
-            self._loc_sf.pack_forget()
+        elif stype == 'Complex Environment Search':
+            self._complex_sf.pack(side=tk.RIGHT)
+        else:
             self._inf_sf.pack(side=tk.RIGHT)
 
     #  USER ACTIONS
@@ -1987,6 +2332,10 @@ class App(tk.Tk):
 
     def _reset(self):
         self._running = False
+        stype    = self._type_var.get()
+        if stype == 'Complex Environment Search':
+            self._on_complex_algo_change()
+            return
         self._start   = random_start_state()
         self._goal    = copy.deepcopy(DEFAULT_GOAL)
         self._cur     = copy.deepcopy(self._start)
@@ -2006,7 +2355,6 @@ class App(tk.Tk):
         self._active_panel.log_clear()
         fn_key   = ALGO_FN_KEY.get(self._algo_var.get(), 'greedy')
         heur_key = 'manhattan' if self._heur_var.get() == 'Manhattan Distance' else 'misplaced'
-        stype    = self._type_var.get()
         if stype == 'Uninformed Search':
             self._unf_panel.reset(fn_key)
         elif isinstance(self._active_panel, InformedPanel):
@@ -2021,6 +2369,10 @@ class App(tk.Tk):
     # ─────────────────────────────────────────
     def _solve(self):
         if self._running: return
+        stype = self._type_var.get()
+        if stype == 'Complex Environment Search':
+            self._solve_complex()
+            return
         parsed = self._parse_start_entries()
         if parsed is None: return
         self._start = parsed
@@ -2110,12 +2462,30 @@ class App(tk.Tk):
             frn   = data.get('frn', 0)
             steps = data.get('steps', len(path) - 1)
             rst   = data.get('restarts', data.get('iterations', None))
-            self.after(0, lambda p=path, e=exp, f=frn, s=steps, r=rst:
-                       self._on_done(p, e, f, s, r))
+            belief = data.get('belief', None)
+            self.after(0, lambda p=path, e=exp, f=frn, s=steps, r=rst, b=belief:
+                       self._on_done(p, e, f, s, r, b))
 
         elif event == 'fail':
             exp = data.get('exp', 0)
             self.after(0, lambda e=exp: self._on_fail(e))
+
+        # ── Complex Environment Search events ──────
+        elif event == 'belief_step':
+            b, p, a = data['belief'], data['path'], data['action']
+            s, e, f = data['step'],  data['exp'],   data['frn']
+            self.after(0, lambda b=b, p=p, a=a, s=s, e=e, f=f:
+                       self._on_complex_step(b, p, a, s, e, f))
+
+        elif event == 'andor_node':
+            st, d, n, k = data['state'], data['depth'], data['nodes'], data['kind']
+            self.after(0, lambda st=st, d=d, n=n, k=k:
+                       self._on_andor_node(st, d, n, k))
+
+        elif event == 'andor_done':
+            plan, e = data['plan'], data['exp']
+            self.after(0, lambda pl=plan, e=e:
+                       self._on_andor_done(pl, e))
 
         # ── Local Search — generic step ─────
         elif event == 'loc_step':
@@ -2228,8 +2598,11 @@ class App(tk.Tk):
         if fn_key == 'idastar' and limit is not None: msg += f'  lim={limit}'
         self._inf_panel.log_write(msg, 'explore')
 
-    def _on_done(self, path, exp, frn, steps, rst):
+    def _on_done(self, path, exp, frn, steps, rst, belief=None):
         self._running = False
+        if isinstance(self._active_panel, ComplexPanel):
+            self._on_complex_done(path, belief, exp, steps)
+            return
         self._lbl_stp.config(text=str(steps))
         if isinstance(self._active_panel, UniformedPanel):
             self._lbl_exp.config(text=str(exp))
@@ -2267,6 +2640,9 @@ class App(tk.Tk):
 
     def _on_fail(self, exp):
         self._running = False
+        if isinstance(self._active_panel, ComplexPanel):
+            self._on_complex_fail(exp)
+            return
         if isinstance(self._active_panel, UniformedPanel):
             self._lbl_exp.config(text=str(exp))
             self._unf_panel.set_status('Khong tim thay duong di!', CLR_FAIL)
@@ -2449,6 +2825,492 @@ class App(tk.Tk):
         self._lbl_frn.config(text=str(total_conflicts))
         self._lbl_stp.config(text=str(step))
         self._csp_panel.log_write(msg, 'explore')
+
+
+    # ── Complex Environment Search UI Builders ─────────
+    def _build_complex_sky(self, parent):
+        self._complex_top_host = parent
+
+    def _build_complex_mint(self, parent):
+        tk.Frame(parent, bg=MNT_BDR, height=3).pack(fill=tk.X)
+        inn = tk.Frame(parent, bg=MNT_BG)
+        inn.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
+
+        # Belief set hien tai
+        bh = tk.Frame(inn, bg=MNT_BG); bh.pack(fill=tk.X, pady=(0,2))
+        tk.Label(bh, text='Tap Niem Tin / Trang Thai Hien Tai',
+                 bg=MNT_BG, fg=MNT_BDR, font=self.F_HDR).pack(side=tk.LEFT)
+        self._belief_count_lbl = tk.Label(bh, text='', bg=MNT_BG,
+                                          fg=CLR_BSIZ, font=self.F_BODY)
+        self._belief_count_lbl.pack(side=tk.LEFT, padx=6)
+
+        sf2 = tk.Frame(inn, bg=MNT_BG); sf2.pack(fill=tk.X, pady=(0,3))
+        tk.Label(sf2, text='Chuoi hanh dong:', bg=MNT_BG, fg=TXT_MID,
+                 font=self.F_STAT).pack(side=tk.LEFT)
+        self._action_seq_lbl = tk.Label(sf2, text='(chua chay)',
+                                         bg=MNT_BG, fg='#E65100', font=self.F_MONO)
+        self._action_seq_lbl.pack(side=tk.LEFT, padx=4)
+
+        bcf = tk.Frame(inn, bg=MNT_BG); bcf.pack(fill=tk.BOTH, expand=True)
+        self._belief_canvas = tk.Canvas(bcf, bg=MNT_BG, highlightthickness=0)
+        bhsb = tk.Scrollbar(bcf, orient=tk.HORIZONTAL, command=self._belief_canvas.xview)
+        self._belief_canvas.configure(xscrollcommand=bhsb.set)
+        bhsb.pack(side=tk.BOTTOM, fill=tk.X)
+        self._belief_canvas.pack(fill=tk.BOTH, expand=True)
+        self._belief_inner = tk.Frame(self._belief_canvas, bg=MNT_BG)
+        self._belief_canvas.create_window((0,0), window=self._belief_inner, anchor='nw')
+        self._belief_inner.bind('<Configure>',
+            lambda e: self._belief_canvas.configure(
+                scrollregion=self._belief_canvas.bbox('all')))
+
+        # Duong di
+        tk.Frame(inn, bg=MNT_BDR, height=1).pack(fill=tk.X, pady=(4,4))
+        ph = tk.Frame(inn, bg=MNT_BG); ph.pack(fill=tk.X, pady=(0,2))
+        tk.Label(ph, text='Duong Di / Ke Hoach',
+                 bg=MNT_BG, fg=MNT_BDR, font=self.F_HDR).pack(side=tk.LEFT)
+        self._path_hint_lbl = tk.Label(ph, text='',
+                                       bg=MNT_BG, fg=TXT_DIM, font=self.F_MINI)
+        self._path_hint_lbl.pack(side=tk.LEFT, padx=6)
+        pcf = tk.Frame(inn, bg=MNT_BG); pcf.pack(fill=tk.BOTH, expand=True)
+        self._complex_path_canvas = tk.Canvas(pcf, bg=MNT_BG, highlightthickness=0)
+        phsb = tk.Scrollbar(pcf, orient=tk.HORIZONTAL, command=self._complex_path_canvas.xview)
+        self._complex_path_canvas.configure(xscrollcommand=phsb.set)
+        phsb.pack(side=tk.BOTTOM, fill=tk.X)
+        self._complex_path_canvas.pack(fill=tk.BOTH, expand=True)
+        self._complex_path_inner = tk.Frame(self._complex_path_canvas, bg=MNT_BG)
+        self._complex_path_canvas.create_window((0,0), window=self._complex_path_inner, anchor='nw')
+        self._complex_path_inner.bind('<Configure>',
+            lambda e: self._complex_path_canvas.configure(
+                scrollregion=self._complex_path_canvas.bbox('all')))
+        self._complex_path_placeholder = tk.Label(self._complex_path_inner, text='Chua co ket qua...',
+                                                  bg=MNT_BG, fg=TXT_DIM, font=self.F_BODY)
+        self._complex_path_placeholder.pack(padx=20, pady=8)
+
+    def _rebuild_complex_top(self):
+        for w in self._complex_top_host.winfo_children():
+            w.destroy()
+        algo = self._algo_var.get()
+
+        if algo == 'AND-OR Graph Search':
+            self._build_top_andor()
+        elif algo == 'No-Obs Multi-Goal BFS':
+            self._build_top_two_col_multigoal()
+        elif algo == 'Partial-Obs Start BFS':
+            self._build_top_two_col_mask_start()
+        elif algo == 'Partial-Obs Goal BFS':
+            self._build_top_two_col_mask_goal()
+        else:  # Belief-State BFS
+            self._build_top_two_col_single_goal()
+
+    def _build_top_two_col_single_goal(self):
+        top = tk.Frame(self._complex_top_host, bg=ROOT_BG)
+        top.pack(fill=tk.BOTH, expand=True)
+        top.columnconfigure(0, weight=1); top.columnconfigure(1, weight=1)
+        top.rowconfigure(0, weight=1)
+        self._make_complex_goal_col(top, [GOAL_SINGLE], 'Trang Thai Dich', col=0)
+        self._make_complex_init_col(top, col=1)
+
+    def _build_top_two_col_multigoal(self):
+        top = tk.Frame(self._complex_top_host, bg=ROOT_BG)
+        top.pack(fill=tk.BOTH, expand=True)
+        top.columnconfigure(0, weight=1); top.columnconfigure(1, weight=1)
+        top.rowconfigure(0, weight=1)
+        # Left: 3 goal nho
+        lf = tk.Frame(top, bg=GOAL_BG,
+                      highlightbackground=GOAL_BDR, highlightthickness=2)
+        lf.grid(row=0, column=0, sticky='nsew', padx=(0,3), pady=0)
+        tk.Frame(lf, bg=GOAL_BDR, height=3).pack(fill=tk.X)
+        inn = tk.Frame(lf, bg=GOAL_BG); inn.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
+        tk.Label(inn, text='Tap Trang Thai Dich (3 goal)',
+                 bg=GOAL_BG, fg=GOAL_BDR, font=self.F_HDR).pack()
+        tk.Label(inn, text='(issubset: tat ca phai vao tap nay)',
+                 bg=GOAL_BG, fg=TXT_MID, font=('Segoe UI',8)).pack(pady=(0,4))
+        grow = tk.Frame(inn, bg=GOAL_BG); grow.pack()
+        for ci, gs in enumerate([GOAL_A, GOAL_B, GOAL_C]):
+            sf = tk.Frame(grow, bg=GOAL_BG); sf.grid(row=0, column=ci, padx=3)
+            tk.Label(sf, text=f'Goal {ci+1}', bg=GOAL_BG, fg=GOAL_BDR,
+                     font=self.F_MINI).pack()
+            gf = tk.Frame(sf, bg=GOAL_BG); gf.pack()
+            self.make_complex_grid(gf, gs, GOAL_T, GOAL_EM, GOAL_TXT,
+                                   font=('Segoe UI',8,'bold'), ipx=3, ipy=2)
+        self._make_complex_init_col(top, col=1)
+
+    def _build_top_two_col_mask_start(self):
+        top = tk.Frame(self._complex_top_host, bg=ROOT_BG)
+        top.pack(fill=tk.BOTH, expand=True)
+        top.columnconfigure(0, weight=1); top.columnconfigure(1, weight=1)
+        top.rowconfigure(0, weight=1)
+        self._make_complex_goal_col(top, [GOAL_SINGLE], 'Trang Thai Dich', col=0)
+        # Right: mask + states
+        rf = tk.Frame(top, bg=INIT_BG,
+                      highlightbackground=INIT_BDR, highlightthickness=2)
+        rf.grid(row=0, column=1, sticky='nsew', padx=(3,0))
+        tk.Frame(rf, bg=INIT_BDR, height=3).pack(fill=tk.X)
+        inn = tk.Frame(rf, bg=INIT_BG); inn.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
+        tk.Label(inn, text='Mask Start (? = an)', bg=INIT_BG, fg=INIT_BDR,
+                 font=self.F_HDR).pack()
+        tk.Label(inn, text='(cac o co so co dinh, o ? ngau nhien)',
+                 bg=INIT_BG, fg=TXT_MID, font=('Segoe UI',8)).pack(pady=(0,4))
+        mf = tk.Frame(inn, bg=INIT_BG); mf.pack()
+        self.make_complex_grid(mf, MASK_START, INIT_T, INIT_EM, INIT_TXT,
+                               font=self.F_STAT, ipx=6, ipy=3, mask=MASK_START)
+        tk.Label(inn, text='Tap niem tin ban dau (sinh ngau nhien):',
+                 bg=INIT_BG, fg=TXT_MID, font=self.F_MINI).pack(pady=(6,2))
+        self._init_state_frame = tk.Frame(inn, bg=INIT_BG); self._init_state_frame.pack()
+        self._render_complex_init_states_in(self._init_state_frame)
+
+    def _build_top_two_col_mask_goal(self):
+        top = tk.Frame(self._complex_top_host, bg=ROOT_BG)
+        top.pack(fill=tk.BOTH, expand=True)
+        top.columnconfigure(0, weight=1); top.columnconfigure(1, weight=1)
+        top.rowconfigure(0, weight=1)
+        # Left: mask goal
+        lf = tk.Frame(top, bg=GOAL_BG,
+                      highlightbackground=GOAL_BDR, highlightthickness=2)
+        lf.grid(row=0, column=0, sticky='nsew', padx=(0,3))
+        tk.Frame(lf, bg=GOAL_BDR, height=3).pack(fill=tk.X)
+        inn = tk.Frame(lf, bg=GOAL_BG); inn.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
+        tk.Label(inn, text='Mask Goal (? = co the)', bg=GOAL_BG, fg=GOAL_BDR,
+                 font=self.F_HDR).pack()
+        tk.Label(inn, text='(tap goal duoc sinh tu mask nay)',
+                 bg=GOAL_BG, fg=TXT_MID, font=('Segoe UI',8)).pack(pady=(0,4))
+        mf = tk.Frame(inn, bg=GOAL_BG); mf.pack()
+        self.make_complex_grid(mf, MASK_GOAL, GOAL_T, GOAL_EM, GOAL_TXT,
+                               font=self.F_STAT, ipx=6, ipy=3, mask=MASK_GOAL)
+        tk.Label(inn, text='(Goal set sinh ngau nhien moi lan Reset)',
+                 bg=GOAL_BG, fg=TXT_DIM, font=self.F_MINI).pack(pady=(4,0))
+        self._make_complex_init_col(top, col=1)
+
+    def _build_top_andor(self):
+        top = tk.Frame(self._complex_top_host, bg=ROOT_BG)
+        top.pack(fill=tk.BOTH, expand=True)
+        top.columnconfigure(0, weight=1); top.columnconfigure(1, weight=1)
+        top.rowconfigure(0, weight=1)
+        # Start
+        lf = tk.Frame(top, bg=INIT_BG,
+                      highlightbackground=INIT_BDR, highlightthickness=2)
+        lf.grid(row=0, column=0, sticky='nsew', padx=(0,3))
+        tk.Frame(lf, bg=INIT_BDR, height=3).pack(fill=tk.X)
+        inn = tk.Frame(lf, bg=INIT_BG); inn.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
+        tk.Label(inn, text='Trang Thai Bat Dau', bg=INIT_BG, fg=INIT_BDR,
+                 font=self.F_HDR).pack()
+        tk.Label(inn, text='(moi truong co the truot)', bg=INIT_BG, fg=TXT_MID,
+                 font=('Segoe UI',8)).pack(pady=(0,6))
+        gf = tk.Frame(inn, bg=INIT_BG); gf.pack()
+        self.make_complex_grid(gf, ANDOR_START, INIT_T, INIT_EM, INIT_TXT,
+                               font=self.F_BIG, ipx=9, ipy=5)
+        # Goal
+        rf = tk.Frame(top, bg=GOAL_BG,
+                      highlightbackground=GOAL_BDR, highlightthickness=2)
+        rf.grid(row=0, column=1, sticky='nsew', padx=(3,0))
+        tk.Frame(rf, bg=GOAL_BDR, height=3).pack(fill=tk.X)
+        inn2 = tk.Frame(rf, bg=GOAL_BG); inn2.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
+        tk.Label(inn2, text='Trang Thai Dich', bg=GOAL_BG, fg=GOAL_BDR,
+                 font=self.F_HDR).pack()
+        tk.Label(inn2, text='(AND-OR tim ke hoach du phong)',
+                 bg=GOAL_BG, fg=TXT_MID, font=('Segoe UI',8)).pack(pady=(0,6))
+        gf2 = tk.Frame(inn2, bg=GOAL_BG); gf2.pack()
+        self.make_complex_grid(gf2, ANDOR_GOAL, GOAL_T, GOAL_EM, GOAL_TXT,
+                               font=self.F_BIG, ipx=9, ipy=5)
+
+    def _make_complex_goal_col(self, parent, goal_list, title, col):
+        lf = tk.Frame(parent, bg=GOAL_BG,
+                      highlightbackground=GOAL_BDR, highlightthickness=2)
+        lf.grid(row=0, column=col, sticky='nsew',
+                padx=(0,3) if col == 0 else (3,0))
+        tk.Frame(lf, bg=GOAL_BDR, height=3).pack(fill=tk.X)
+        inn = tk.Frame(lf, bg=GOAL_BG); inn.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
+        tk.Label(inn, text=title, bg=GOAL_BG, fg=GOAL_BDR, font=self.F_HDR).pack()
+        tk.Label(inn, text='(dich can dat)', bg=GOAL_BG, fg=TXT_MID,
+                 font=('Segoe UI',8)).pack(pady=(0,6))
+        gf = tk.Frame(inn, bg=GOAL_BG); gf.pack()
+        self.make_complex_grid(gf, goal_list[0], GOAL_T, GOAL_EM, GOAL_TXT,
+                               font=self.F_BIG, ipx=9, ipy=5)
+
+    def _make_complex_init_col(self, parent, col):
+        rf = tk.Frame(parent, bg=INIT_BG,
+                      highlightbackground=INIT_BDR, highlightthickness=2)
+        rf.grid(row=0, column=col, sticky='nsew',
+                padx=(3,0) if col == 1 else (0,3))
+        tk.Frame(rf, bg=INIT_BDR, height=3).pack(fill=tk.X)
+        inn = tk.Frame(rf, bg=INIT_BG); inn.pack(fill=tk.BOTH, expand=True, padx=6, pady=4)
+        tk.Label(inn, text='Tap Niem Tin Ban Dau', bg=INIT_BG, fg=INIT_BDR,
+                 font=self.F_HDR).pack()
+        n = len(self._complex_start_belief)
+        tk.Label(inn, text=f'({n} trang thai ngau nhien)', bg=INIT_BG, fg=TXT_MID,
+                 font=('Segoe UI',8)).pack(pady=(0,4))
+        self._init_state_frame = tk.Frame(inn, bg=INIT_BG)
+        self._init_state_frame.pack()
+        self._render_complex_init_states_in(self._init_state_frame)
+
+    def _render_complex_init_states_in(self, parent):
+        for w in parent.winfo_children():
+            w.destroy()
+        for ci, state in enumerate(sorted(self._complex_start_belief)):
+            sf = tk.Frame(parent, bg=INIT_BG); sf.grid(row=0, column=ci, padx=5)
+            tk.Label(sf, text=f'Trang thai {ci+1}', bg=INIT_BG, fg=INIT_BDR,
+                     font=self.F_MINI).pack(pady=(0,2))
+            gf = tk.Frame(sf, bg=INIT_BG); gf.pack()
+            self.make_complex_grid(gf, state, INIT_T, INIT_EM, INIT_TXT,
+                                   font=self.F_STAT, ipx=6, ipy=3)
+
+    def make_complex_grid(self, parent, state, bg_t, bg_em, fg,
+                          font=None, ipx=6, ipy=3, px=2, py=2, mask=None):
+        if font is None:
+            font = self.F_STAT
+        lbls = [[None]*3 for _ in range(3)]
+        for i in range(3):
+            for j in range(3):
+                v = state[i][j]
+                hidden = mask and mask[i][j] == -1
+                txt  = '?' if hidden else (str(v) if v != 0 else '')
+                bgc  = '#BDBDBD' if hidden else (bg_em if v == 0 else bg_t)
+                lbl = tk.Label(parent, text=txt, width=2,
+                               bg=bgc, fg=fg, font=font, relief='flat',
+                               highlightbackground='#B2DFDB', highlightthickness=1)
+                lbl.grid(row=i, column=j, padx=px, pady=py, ipadx=ipx, ipady=ipy)
+                lbls[i][j] = lbl
+        return lbls
+
+    def _render_belief_set(self, belief, goal_ref=None):
+        for w in self._belief_inner.winfo_children():
+            w.destroy()
+        lst = sorted(belief)
+        n = len(lst)
+        self._belief_count_lbl.config(text=f'({n} ma tran)')
+        self._lbl_bsiz.config(text=str(n))
+        for idx, state in enumerate(lst):
+            sf = tk.Frame(self._belief_inner, bg=MNT_BG,
+                          highlightbackground=MNT_BDR, highlightthickness=1)
+            sf.pack(side=tk.LEFT, padx=5, pady=5, anchor='n')
+            tk.Label(sf, text=f'Ma tran {idx+1}', bg=MNT_BG, fg=MNT_BDR,
+                     font=self.F_MINI).pack(pady=(3,1))
+            gf = tk.Frame(sf, bg=MNT_BG); gf.pack(padx=4, pady=(0,2))
+            self.make_complex_grid(gf, state, MNT_TILE, MNT_EM, MNT_TXT,
+                                   font=self.F_MINI, ipx=7, ipy=4)
+            # Status label
+            is_g = False
+            if goal_ref:
+                if isinstance(goal_ref, frozenset):
+                    is_g = state in goal_ref
+                else:
+                    is_g = (state == goal_ref)
+            if is_g:
+                lbl, clr = 'GOAL', CLR_OK
+            else:
+                h = sum(1 for i in range(3) for j in range(3)
+                        if state[i][j] != 0 and state[i][j] != GOAL_SINGLE[i][j])
+                lbl, clr = f'h={h}', TXT_MID
+            tk.Label(sf, text=lbl, bg=MNT_BG, fg=clr, font=self.F_MINI).pack(pady=(0,3))
+        self._belief_canvas.update_idletasks()
+        self._belief_canvas.configure(scrollregion=self._belief_canvas.bbox('all'))
+
+    def _clear_complex_path(self):
+        for w in self._complex_path_inner.winfo_children():
+            w.destroy()
+
+    def _show_belief_path(self, action_seq, goal_ref=None):
+        self._clear_complex_path()
+        if not action_seq:
+            tk.Label(self._complex_path_inner, text='Da o dich ngay tu dau!',
+                     bg=MNT_BG, fg=CLR_OK, font=self.F_BODY).pack(padx=20, pady=8)
+            self._complex_path_canvas.update_idletasks()
+            self._complex_path_canvas.configure(scrollregion=self._complex_path_canvas.bbox('all'))
+            return
+        steps = [self._complex_start_belief]
+        cur = self._complex_start_belief
+        for act in action_seq:
+            cur = frozenset(move_blank(s, act) for s in cur)
+            steps.append(cur)
+        for idx, bsnap in enumerate(steps):
+            rep = sorted(bsnap)[0]
+            n   = len(bsnap)
+            if idx == 0:       lt, lc = 'Start', '#1565C0'
+            elif idx == len(steps)-1: lt, lc = 'Goal', CLR_OK
+            else:              lt, lc = action_seq[idx-1], MNT_TXT
+            sf = tk.Frame(self._complex_path_inner, bg=MNT_BG); sf.pack(side=tk.LEFT, padx=2, pady=4)
+            tk.Label(sf, text=lt, bg=MNT_BG, fg=lc, font=self.F_MINI).pack()
+            gf = tk.Frame(sf, bg=MNT_BG); gf.pack()
+            self.make_complex_grid(gf, rep, MNT_TILE, MNT_EM, MNT_TXT,
+                                   font=self.F_MINI, ipx=2, ipy=1, px=1, py=1)
+            tk.Label(sf, text=f'|B|={n}', bg=MNT_BG, fg=TXT_DIM, font=self.F_MINI).pack()
+            if idx < len(steps)-1:
+                tk.Label(self._complex_path_inner, text='>',
+                         bg=MNT_BG, fg=MNT_BDR,
+                         font=('Segoe UI', 13, 'bold')).pack(side=tk.LEFT, padx=1)
+        self._complex_path_canvas.update_idletasks()
+        self._complex_path_canvas.configure(scrollregion=self._complex_path_canvas.bbox('all'))
+
+    def _show_andor_path(self, plan):
+        self._clear_complex_path()
+        self._path_hint_lbl.config(text='(Ke hoach du phong — xem log chi tiet)')
+        lines = format_plan_lines(plan)
+        txt = tk.Text(self._complex_path_inner, bg=MNT_BG, fg=TXT_DARK,
+                      font=('Consolas', 8), relief='flat',
+                      state=tk.NORMAL, wrap=tk.NONE, height=6)
+        txt.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        for ln in lines[:60]:
+            txt.insert(tk.END, ln + '\n')
+        txt.config(state=tk.DISABLED)
+        self._complex_path_canvas.update_idletasks()
+        self._complex_path_canvas.configure(scrollregion=self._complex_path_canvas.bbox('all'))
+
+    def _on_complex_algo_change(self):
+        self._running = False
+        algo = self._algo_var.get()
+        if algo == 'AND-OR Graph Search':
+            self._complex_start_belief = frozenset([ANDOR_START])
+            self._complex_goal_ref = ANDOR_GOAL
+        elif algo == 'Partial-Obs Start BFS':
+            self._complex_start_belief = generate_from_mask(MASK_START, n=2)
+            self._complex_goal_ref = GOAL_SINGLE
+        elif algo == 'Partial-Obs Goal BFS':
+            self._complex_start_belief = generate_random_belief(n=2)
+            self._complex_goal_ref = generate_goal_from_mask(MASK_GOAL, n=3)
+        elif algo == 'No-Obs Multi-Goal BFS':
+            self._complex_start_belief = generate_random_belief(n=2)
+            self._complex_goal_ref = GOAL_MULTI
+        else: # Belief-State BFS
+            self._complex_start_belief = generate_random_belief(n=2)
+            self._complex_goal_ref = GOAL_SINGLE
+
+        self._rebuild_complex_top()
+        self._render_belief_set(self._complex_start_belief, self._complex_goal_ref)
+        self._clear_complex_path()
+        self._complex_path_placeholder = tk.Label(self._complex_path_inner, text='Chua co ket qua...',
+                                                  bg=MNT_BG, fg=TXT_DIM, font=self.F_BODY)
+        self._complex_path_placeholder.pack(padx=20, pady=8)
+        self._action_seq_lbl.config(text='(chua chay)')
+        self._lbl_stp.config(text='—')
+        self._lbl_bsiz.config(text=str(len(self._complex_start_belief)))
+        self._lbl_exp_complex.config(text='0')
+        self._complex_panel.reset(algo)
+        self._path_hint_lbl.config(text='')
+
+    def _on_algo_change_routing(self):
+        if self._type_var.get() == 'Complex Environment Search':
+            self._on_complex_algo_change()
+        else:
+            self._on_algo_change()
+
+    def _solve_complex(self):
+        self._running = True
+        algo = self._algo_var.get()
+        
+        self._complex_panel.reset(algo)
+        self._complex_panel.set_status('Dang tim kiem...', CLR_WARN)
+        self._complex_panel.log_write(f'[BAT DAU]  {algo}', 'start')
+        
+        self._clear_complex_path()
+        tk.Label(self._complex_path_inner, text='Dang tim...', bg=MNT_BG,
+                 fg=TXT_DIM, font=self.F_BODY).pack(padx=20, pady=8)
+                 
+        self._action_seq_lbl.config(text='(dang chay...)')
+        self._lbl_exp_complex.config(text='0')
+        self._lbl_stp.config(text='0')
+        
+        self._render_belief_set(self._complex_start_belief, self._complex_goal_ref)
+
+        sb = self._complex_start_belief
+        gr = self._complex_goal_ref
+
+        if algo == 'AND-OR Graph Search':
+            self._complex_panel.log_write(
+                f'  Start: {[v for r in ANDOR_START for v in r]}', 'info')
+            self._complex_panel.log_write(
+                f'  Goal:  {[v for r in ANDOR_GOAL  for v in r]}', 'info')
+            self._complex_panel.log_write(
+                '  (Moi truong: bam U => co the bi truot L hoac R)', 'info')
+            threading.Thread(target=and_or_search,
+                             args=(ANDOR_START, ANDOR_GOAL, self._cb),
+                             daemon=True).start()
+        elif algo == 'No-Obs Multi-Goal BFS':
+            self._complex_panel.log_write(
+                f'  Start belief: {len(sb)} ma tran', 'info')
+            self._complex_panel.log_write(
+                f'  Goal set: {len(gr)} trang thai dich', 'info')
+            threading.Thread(target=belief_bfs_multi_goal,
+                             args=(sb, gr, self._cb), daemon=True).start()
+        elif algo == 'Partial-Obs Goal BFS':
+            self._complex_panel.log_write(
+                f'  Start belief: {len(sb)} ma tran ngau nhien', 'info')
+            self._complex_panel.log_write(
+                f'  Goal set (tu mask): {len(gr)} trang thai', 'info')
+            threading.Thread(target=belief_bfs_goal_mask,
+                             args=(sb, gr, self._cb), daemon=True).start()
+        else:  # Belief-State BFS & Partial-Obs Start BFS
+            self._complex_panel.log_write(
+                f'  Start belief: {len(sb)} ma tran', 'info')
+            self._complex_panel.log_write(
+                f'  Goal: {[v for r in gr for v in r]}', 'info')
+            threading.Thread(target=belief_bfs_single_goal,
+                             args=(sb, gr, self._cb), daemon=True).start()
+
+    def _on_complex_step(self, belief, path, action, step, exp, frn):
+        seq = ' -> '.join(path) if path else '(khoi dau)'
+        self._action_seq_lbl.config(text=seq)
+        self._lbl_exp_complex.config(text=str(exp))
+        self._lbl_stp.config(text=str(step))
+        self._complex_panel.update_info(len(belief), step, action, exp, frn)
+        self._render_belief_set(belief, self._complex_goal_ref)
+        act_s = f"->'{action}'" if action else '(start)'
+        self._complex_panel.log_write(
+            f'[#{exp:>4}] buoc={step} {act_s}  belief_size={len(belief)}', 'step')
+
+    def _on_andor_node(self, state, depth, nodes, kind):
+        self._lbl_exp_complex.config(text=str(nodes))
+        row = [v for r in state for v in r]
+        self._complex_panel.log_write(
+            f'[{kind}] depth={depth}  nodes={nodes}  state={row}', 'andor')
+
+    def _on_complex_done(self, path, belief, exp, steps):
+        self._running = False
+        seq = ' -> '.join(path) if path else '(truc tiep)'
+        self._action_seq_lbl.config(text=f'OK  {seq}')
+        self._lbl_stp.config(text=str(steps))
+        self._lbl_exp_complex.config(text=str(exp))
+        self._complex_panel.update_info(len(belief), steps,
+                                     path[-1] if path else None, exp, 0)
+        self._complex_panel.set_status(f'Thanh cong!  {steps} buoc', CLR_OK)
+        self._complex_panel.log_write(
+            f'\n[XONG]  {steps} buoc — {exp} nodes kham pha', 'done')
+        self._complex_panel.log_write(f'       Chuoi: {path}', 'done')
+        if belief:
+            self._render_belief_set(belief, self._complex_goal_ref)
+            self._show_belief_path(path, self._complex_goal_ref)
+        else:
+            self._render_belief_set(frozenset([ANDOR_GOAL]), self._complex_goal_ref)
+        self._flash_solve_button()
+
+    def _on_andor_done(self, plan, exp):
+        self._running = False
+        self._lbl_exp_complex.config(text=str(exp))
+        self._lbl_stp.config(text='N/A')
+        self._action_seq_lbl.config(text='OK  (Ke hoach du phong)')
+        self._complex_panel.set_status('Thanh cong!  Tim duoc ke hoach du phong', CLR_OK)
+        self._complex_panel.log_write(
+            f'\n[XONG AND-OR]  {exp} nodes  — Ke hoach du phong:', 'done')
+        for ln in format_plan_lines(plan):
+            self._complex_panel.log_write('  ' + ln, 'plan')
+        self._render_belief_set(frozenset([ANDOR_GOAL]), self._complex_goal_ref)
+        self._show_andor_path(plan)
+        self._flash_solve_button()
+
+    def _on_complex_fail(self, exp):
+        self._running = False
+        self._action_seq_lbl.config(text='Khong tim thay!')
+        self._complex_panel.set_status('Khong tim thay giai phap!', CLR_FAIL)
+        self._complex_panel.log_write(
+            f'\n[THAT BAI]  {exp} nodes, khong co giai phap.\n', 'fail')
+        self._lbl_exp_complex.config(text=str(exp))
+        
+    def _flash_solve_button(self, n=6):
+        def _f(k):
+            if k <= 0:
+                self._btn_solve.config(bg=BTN_SOLVE); return
+            self._btn_solve.config(bg='#1B5E20' if k%2==0 else BTN_SOLVE)
+            self.after(200, lambda: _f(k-1))
+        _f(n)
 
 
 # ═══════════════════════════════════════════════════════════
